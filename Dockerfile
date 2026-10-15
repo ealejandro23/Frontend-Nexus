@@ -1,16 +1,32 @@
-FROM python:3.12-slim
+# =============================================================================
+# DOCKERFILE - FRONT (STREAMLIT)
+# =============================================================================
+# Imagen base Python slim para linux/amd64
+# =============================================================================
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
-    GATEWAY_URL=http://gateway:8080
+FROM python:3.11-slim
+
+# Establecer directorio de trabajo
 WORKDIR /app
 
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar requirements e instalar dependencias Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+# Copiar código de la aplicación
+COPY app.py .
 
-RUN useradd --create-home appuser
-USER appuser
+# Exponer puerto de Streamlit
+EXPOSE 8501
 
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8501/_stcore/health || exit 1
+
+# Comando para ejecutar Streamlit
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
