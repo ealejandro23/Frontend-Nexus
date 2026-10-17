@@ -236,13 +236,14 @@ def dashboard():
   body {{ font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #17201c; }}
   nav {{ margin-bottom: 1.5rem; }}
   nav a {{ margin-right: 1rem; color: #0f6b4f; text-decoration: none; font-weight: 600; }}
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }}
-  .card {{ background: #f4f8f6; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1rem; text-align: center; }}
-  .card .num {{ font-size: 2rem; font-weight: 700; color: #0f6b4f; }}
-  .card .label {{ color: #5b6862; font-size: .9rem; }}
-  .charts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.5rem; margin: 1.5rem 0; }}
-  .chart-box {{ background: #fff; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1rem; }}
-  .chart-box h3 {{ margin: 0 0 .5rem; font-size: 1rem; color: #5b6862; }}
+  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1.2rem; margin: 1.5rem 0; }}
+  .card {{ background: linear-gradient(135deg, #f4f8f6, #e8f4f0); border: 1px solid #d5ddd9; border-radius: 12px; padding: 1.5rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.06); }}
+  .card .num {{ font-size: 2.4rem; font-weight: 800; color: #0f6b4f; margin-bottom: .3rem; }}
+  .card .label {{ color: #5b6862; font-size: .95rem; font-weight: 500; }}
+  .charts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 2rem; margin: 1.5rem 0; }}
+  .chart-box {{ background: #fff; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1.5rem; min-height: 320px; }}
+  .chart-box h3 {{ margin: 0 0 1rem; font-size: 1.1rem; color: #17201c; font-weight: 600; }}
+  .chart-box canvas {{ max-height: 300px; }}
   table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
   th, td {{ text-align: left; padding: .4rem; border-bottom: 1px solid #d5ddd9; }}
   .health {{ margin: 1rem 0; }}
