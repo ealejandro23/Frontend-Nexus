@@ -60,3 +60,27 @@ def test_respuesta_fuera_de_contrato_no_rompe_la_pagina(monkeypatch, respuesta):
     r = predecir()
     assert r.status_code == 200
     assert "formato inesperado" in r.text
+
+
+def test_envia_la_clave_x_api_key_al_gateway(monkeypatch):
+    vistas = []
+    falso = gateway_falso()
+
+    def espia(metodo, url, **kwargs):
+        vistas.append((kwargs.get("headers") or {}).get("X-API-Key"))
+        return falso(metodo, url, **kwargs)
+
+    monkeypatch.setattr(main, "API_KEY", "clave-de-prueba-123456")
+    monkeypatch.setattr(main.httpx, "request", espia)
+    cliente.get("/")
+    assert vistas and all(v == "clave-de-prueba-123456" for v in vistas)
+
+
+def test_clave_rechazada_muestra_aviso_claro(monkeypatch):
+    def rechaza(metodo, url, **kwargs):
+        return httpx.Response(401, json={"detail": "Falta la cabecera X-API-Key"}, request=httpx.Request(metodo, url))
+
+    monkeypatch.setattr(main.httpx, "request", rechaza)
+    r = cliente.get("/")
+    assert r.status_code == 200
+    assert "X-API-Key" in r.text

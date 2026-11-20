@@ -13,6 +13,8 @@ from fastapi.responses import HTMLResponse
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://gateway:8080")
 DOMINIO = f"{GATEWAY_URL}/api/dominio"
 TIMEOUT_S = float(os.getenv("TIMEOUT_S", "5"))
+# Clave que exige el gateway en la cabecera X-API-Key (se lee del .env del servidor, nunca del repo).
+API_KEY = os.getenv("API_KEY", "")
 CATEGORIAS_POR_DEFECTO = ["Almacenamiento", "Audio", "Cables y adaptadores", "Componentes", "Gaming",
                           "Monitores", "Notebooks", "Perifericos", "Redes", "Smartphones"]
 RESPUESTA_INESPERADA = "El servicio de dominio respondio en un formato inesperado. Avisa al equipo."
@@ -27,7 +29,8 @@ class ErrorServicio(Exception):
 def llamar(metodo: str, url: str, **kwargs):
     inicio = time.perf_counter()
     try:
-        r = httpx.request(metodo, url, timeout=TIMEOUT_S, **kwargs)
+        headers = {**kwargs.pop("headers", {}), "X-API-Key": API_KEY} if API_KEY else kwargs.pop("headers", None)
+        r = httpx.request(metodo, url, timeout=TIMEOUT_S, headers=headers, **kwargs)
     except httpx.TimeoutException:
         raise ErrorServicio(f"El servicio tardo mas de {TIMEOUT_S:.0f} s en responder.")
     except httpx.TransportError:
@@ -38,6 +41,10 @@ def llamar(metodo: str, url: str, **kwargs):
     except ValueError:
         datos = None
     detalle = datos.get("detail") if isinstance(datos, dict) else None
+    if r.status_code == 401:
+        raise ErrorServicio("El gateway rechazo la clave de acceso (X-API-Key). Revisa API_KEY en el .env.")
+    if r.status_code == 429:
+        raise ErrorServicio("Demasiadas peticiones seguidas. Espera unos segundos e intenta de nuevo.")
     if r.status_code in (502, 503, 504):
         raise ErrorServicio(detalle or "Un servicio del sistema no esta disponible.")
     if r.is_error:
