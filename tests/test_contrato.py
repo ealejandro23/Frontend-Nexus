@@ -40,7 +40,7 @@ def test_prediccion_exitosa_muestra_probabilidad_version_e_historial(monkeypatch
     assert r.status_code == 200
     assert "73%" in r.text
     assert "Modelo v1" in r.text
-    assert "réplica dominio1" in r.text
+    assert "replica dominio1" in r.text
     assert "Audífonos" in r.text          # historial
     assert "U103808 (Coquimbo)" in r.text  # lista de clientes
 
