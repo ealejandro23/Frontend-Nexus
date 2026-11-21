@@ -2,16 +2,25 @@
 FastAPI arma la pagina en Python y llama al dominio a traves del gateway.
 """
 import os
+import re
+import threading
 import time
 from html import escape
 from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://gateway:8080")
 DOMINIO = f"{GATEWAY_URL}/api/dominio"
+CAMPANAS = f"{GATEWAY_URL}/api/campanas"          # POST encola el texto del LLM (worker + RabbitMQ)
+PREDICCIONES = f"{GATEWAY_URL}/api/predicciones"  # GET /{job_id} devuelve el texto cuando esta listo
+MIN_PRODUCTOS, MAX_PRODUCTOS = 4, 8
+RESERVA_TTL_S = 300                               # la lista de mas vendidos se refresca cada 5 min
+LLM_ESPERA_MAX_S = int(os.getenv("LLM_ESPERA_MAX_S", "30"))
+LLM_INTERVALO_S = 2
+JOB_ID_VALIDO = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 TIMEOUT_S = float(os.getenv("TIMEOUT_S", "5"))
 # Clave que exige el gateway en la cabecera X-API-Key (se lee del .env del servidor, nunca del repo).
 API_KEY = os.getenv("API_KEY", "")
@@ -23,7 +32,27 @@ app = FastAPI(title="front", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 class ErrorServicio(Exception):
-    pass
+    def __init__(self, mensaje: str, status: int | None = None):
+        super().__init__(mensaje)
+        self.status = status
+
+
+# Contadores para el dashboard (en memoria: se reinician si se reinicia el contenedor del front).
+_estadisticas = {"entregadas": 0, "con_reserva": 0, "llm_con_texto": 0, "llm_degradado": 0}
+_jobs_contados: set[str] = set()
+_reserva = {"productos": [], "ts": 0.0}
+_lock = threading.Lock()
+
+
+def contar(clave: str, job_id: str | None = None) -> None:
+    with _lock:
+        if job_id is not None:
+            if job_id in _jobs_contados:
+                return
+            _jobs_contados.add(job_id)
+            if len(_jobs_contados) > 5000:
+                _jobs_contados.clear()
+        _estadisticas[clave] += 1
 
 
 def llamar(metodo: str, url: str, **kwargs):
@@ -42,14 +71,133 @@ def llamar(metodo: str, url: str, **kwargs):
         datos = None
     detalle = datos.get("detail") if isinstance(datos, dict) else None
     if r.status_code == 401:
-        raise ErrorServicio("El gateway rechazo la clave de acceso (X-API-Key). Revisa API_KEY en el .env.")
+        raise ErrorServicio("El gateway rechazo la clave de acceso (X-API-Key). Revisa API_KEY en el .env.", 401)
     if r.status_code == 429:
-        raise ErrorServicio("Demasiadas peticiones seguidas. Espera unos segundos e intenta de nuevo.")
+        raise ErrorServicio("Demasiadas peticiones seguidas. Espera unos segundos e intenta de nuevo.", 429)
     if r.status_code in (502, 503, 504):
-        raise ErrorServicio(detalle or "Un servicio del sistema no esta disponible.")
+        raise ErrorServicio(detalle or "Un servicio del sistema no esta disponible.", r.status_code)
     if r.is_error:
-        raise ErrorServicio(f"Error {r.status_code}: {detalle or 'respuesta inesperada'}")
+        raise ErrorServicio(f"Error {r.status_code}: {detalle or 'respuesta inesperada'}", r.status_code)
     return datos, ms
+
+
+# ---------------------------------------------------------------------------
+# Recomendaciones: entre 4 y 8 productos, con lista de reserva (mas vendidos)
+# ---------------------------------------------------------------------------
+
+def productos_de(datos) -> list[dict]:
+    """Toma la lista "recomendaciones" del dominio y descarta lo que no tenga el formato esperado."""
+    items = datos.get("recomendaciones") if isinstance(datos, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [
+        {"sku": str(i["sku"]), "nombre": str(i.get("nombre") or i["sku"]), "categoria": str(i.get("categoria") or "-")}
+        for i in items if isinstance(i, dict) and i.get("sku")
+    ]
+
+
+def lista_reserva() -> list[dict]:
+    """Mas vendidos: la misma ruta del dominio sin usuario solo ordena por popularidad.
+    Se guarda en memoria para poder usarla aunque el dominio falle despues."""
+    if _reserva["productos"] and time.monotonic() - _reserva["ts"] < RESERVA_TTL_S:
+        return _reserva["productos"]
+    try:
+        datos, _ = llamar("GET", f"{DOMINIO}/api/recomendaciones", params={"limite": MAX_PRODUCTOS})
+        productos = productos_de(datos)
+        if productos:
+            _reserva.update(productos=productos, ts=time.monotonic())
+    except ErrorServicio:
+        pass
+    return _reserva["productos"]
+
+
+def recomendar(usuario_id: str) -> tuple[list[dict], bool, str | None]:
+    """Devuelve (productos, uso_reserva, motivo). Usa la lista de reserva si el recomendador personalizado
+    falla, si el cliente no tiene historial para personalizar o si entrega menos de 4 productos."""
+    reserva = lista_reserva()
+    motivo = None
+    try:
+        datos, _ = llamar("GET", f"{DOMINIO}/api/recomendaciones",
+                          params={"usuario_id": usuario_id, "limite": MAX_PRODUCTOS})
+        personales = productos_de(datos)
+    except ErrorServicio as e:
+        personales, motivo = [], f"El recomendador personalizado no respondio: {e}"
+    if personales and reserva and [p["sku"] for p in personales] == [p["sku"] for p in reserva]:
+        personales, motivo = [], "El cliente no tiene historial suficiente para personalizar."
+    if len(personales) >= MIN_PRODUCTOS:
+        return personales[:MAX_PRODUCTOS], False, None
+    vistos = {p["sku"] for p in personales}
+    productos = (personales + [p for p in reserva if p["sku"] not in vistos])[:MAX_PRODUCTOS]
+    return productos, True, motivo or "Habia pocas recomendaciones personalizadas; se completo con los mas vendidos."
+
+
+def recomendaciones_html(usuario_id: str) -> str:
+    productos, reserva, motivo = recomendar(usuario_id)
+    if len(productos) < MIN_PRODUCTOS:
+        return ('<p class="error">No se pudieron cargar recomendaciones de productos en este momento. '
+                'Intenta de nuevo en unos segundos.</p>')
+    contar("entregadas")
+    if reserva:
+        contar("con_reserva")
+    aviso = (f'<p class="aviso"><strong>Lista de reserva (mas vendidos).</strong> {escape(motivo or "")}</p>'
+             if reserva else '<p class="meta">Recomendaciones personalizadas segun su historial de compras y navegacion.</p>')
+    tarjetas = "".join(
+        f'<li class="producto"><span class="nombre">{escape(p["nombre"])}</span>'
+        f'<span class="meta">{escape(p["categoria"])} &middot; {escape(p["sku"])}</span></li>'
+        for p in productos
+    )
+    return f'<h2>Productos recomendados ({len(productos)})</h2>{aviso}<ul class="productos">{tarjetas}</ul>'
+
+
+# ---------------------------------------------------------------------------
+# Texto del LLM: POST /api/campanas/{usuario} -> job_id; el navegador consulta /llm/{job_id}
+# (el front reenvia a GET /api/predicciones/{job_id} con la clave: la clave nunca llega al navegador)
+# ---------------------------------------------------------------------------
+
+def iniciar_campana(usuario_id: str) -> str | None:
+    try:
+        datos, _ = llamar("POST", f"{CAMPANAS}/{quote(usuario_id, safe='')}", json={})
+    except ErrorServicio:
+        return None
+    job_id = datos.get("job_id") if isinstance(datos, dict) else None
+    return job_id if isinstance(job_id, str) and JOB_ID_VALIDO.match(job_id) else None
+
+
+def llm_html(usuario_id: str) -> str:
+    job_id = iniciar_campana(usuario_id)
+    if not job_id:
+        contar("llm_degradado")
+        return ('<h2>Mensaje personalizado</h2><div class="llm aviso"><strong>Modo degradado:</strong> '
+                'el servicio de mensajes personalizados no esta disponible. Las recomendaciones siguen funcionando.</div>')
+    intentos = max(1, LLM_ESPERA_MAX_S // LLM_INTERVALO_S)
+    # job_id ya paso por JOB_ID_VALIDO (solo letras, numeros, _ y -): es seguro dentro del script.
+    return f"""<h2>Mensaje personalizado</h2>
+<div id="llm" class="llm"><span class="meta">Generando mensaje personalizado con IA...</span></div>
+<script>
+(function () {{
+  const caja = document.getElementById("llm");
+  const job = "{job_id}";
+  let intento = 0;
+  function mostrar(clase, titulo, texto) {{
+    caja.className = "llm " + clase;
+    caja.textContent = "";
+    if (titulo) {{ const t = document.createElement("strong"); t.textContent = titulo; caja.appendChild(t); }}
+    const p = document.createElement("p"); p.textContent = texto; caja.appendChild(p);
+  }}
+  function consultar() {{
+    intento += 1;
+    fetch("/llm/" + encodeURIComponent(job) + "?intento=" + intento)
+      .then(r => r.json())
+      .then(d => {{
+        if (d.estado === "pendiente" && intento < {intentos}) {{ setTimeout(consultar, {LLM_INTERVALO_S * 1000}); return; }}
+        if (d.estado === "listo") {{ mostrar("ok", d.asunto || "", d.mensaje || ""); return; }}
+        mostrar("aviso", "Modo degradado: ", d.motivo || "El mensaje personalizado no llego a tiempo.");
+      }})
+      .catch(() => mostrar("aviso", "Modo degradado: ", "No se pudo consultar el mensaje personalizado."));
+  }}
+  setTimeout(consultar, {LLM_INTERVALO_S * 1000});
+}})();
+</script>"""
 
 
 def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") -> str:
@@ -98,6 +246,13 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
   .prob {{ font-size: 3rem; font-weight: 700; margin: 1rem 0 0; }}
   .meta {{ color: #5b6862; font-size: .9rem; }}
   .error {{ background: #fbe9e5; color: #a3341f; padding: .75rem; border-radius: 6px; }}
+  .aviso {{ background: #fff6e0; color: #6b4a00; padding: .75rem; border-radius: 6px; }}
+  .productos {{ list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .75rem; }}
+  .producto {{ border: 1px solid #d5ddd9; border-radius: 8px; padding: .75rem; display: grid; gap: .25rem; }}
+  .producto .nombre {{ font-weight: 600; }}
+  .llm {{ padding: .75rem; border-radius: 6px; border: 1px solid #d5ddd9; }}
+  .llm.ok {{ background: #e8f4f0; }}
+  .llm p {{ margin: .4rem 0 0; white-space: pre-line; }}
   table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
   th, td {{ text-align: left; padding: .4rem; border-bottom: 1px solid #d5ddd9; }}
 </style></head>
@@ -145,6 +300,31 @@ def inicio():
     return pagina()
 
 
+@app.get("/llm/{job_id}")
+def estado_llm(job_id: str, intento: int = 1):
+    """El navegador consulta aqui; el front pregunta al gateway con la clave X-API-Key."""
+    if not JOB_ID_VALIDO.match(job_id):
+        return JSONResponse(status_code=422, content={"detail": "job_id invalido"})
+    ultimo = intento >= max(1, LLM_ESPERA_MAX_S // LLM_INTERVALO_S)
+    try:
+        datos, _ = llamar("GET", f"{PREDICCIONES}/{job_id}")
+    except ErrorServicio as e:
+        if e.status == 404 and not ultimo:
+            return {"estado": "pendiente"}
+        contar("llm_degradado", job_id)
+        motivo = "El mensaje personalizado no llego a tiempo." if e.status == 404 else str(e)
+        return {"estado": "degradado", "motivo": motivo}
+    if not isinstance(datos, dict) or not datos.get("mensaje"):
+        contar("llm_degradado", job_id)
+        return {"estado": "degradado", "motivo": RESPUESTA_INESPERADA}
+    if datos.get("degradado"):
+        contar("llm_degradado", job_id)
+        return {"estado": "degradado",
+                "motivo": "El LLM no respondio; se muestra un mensaje generico. " + str(datos.get("mensaje"))[:500]}
+    contar("llm_con_texto", job_id)
+    return {"estado": "listo", "asunto": str(datos.get("asunto") or ""), "mensaje": str(datos["mensaje"])[:2000]}
+
+
 @app.post("/predecir", response_class=HTMLResponse)
 def predecir(usuario_id: str = Form(...), categoria: str = Form(...)):
     try:
@@ -162,6 +342,8 @@ def predecir(usuario_id: str = Form(...), categoria: str = Form(...)):
         resultado = f'<p class="error">{escape(str(e))}</p>'
     except (KeyError, TypeError, ValueError):
         resultado = f'<p class="error">{RESPUESTA_INESPERADA}</p>'
+    resultado += recomendaciones_html(usuario_id)
+    resultado += llm_html(usuario_id)
     resultado += f"<h2>Historial de compras</h2>{historial_html(usuario_id)}"
     return pagina(usuario_sel=usuario_id, categoria_sel=categoria, resultado=resultado)
 
@@ -244,6 +426,10 @@ def dashboard():
 
     import json as _json
 
+    with _lock:
+        est = dict(_estadisticas)
+    pct_reserva = f"{est['con_reserva'] / est['entregadas']:.0%}" if est["entregadas"] else "-"
+
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -276,6 +462,16 @@ def dashboard():
   <nav><a href="/">Recomendador</a><a href="/dashboard">Dashboard</a></nav>
   <h1>Dashboard - Nexo Recommender</h1>
   <div class="health">{health_html}</div>
+
+  <h2>Recomendaciones entregadas</h2>
+  <div class="cards">
+    <div class="card"><div class="num">{est["entregadas"]}</div><div class="label">Recomendaciones entregadas</div></div>
+    <div class="card"><div class="num">{est["con_reserva"]}</div><div class="label">Con lista de reserva (mas vendidos)</div></div>
+    <div class="card"><div class="num">{pct_reserva}</div><div class="label">Proporcion con lista de reserva</div></div>
+    <div class="card"><div class="num">{est["llm_con_texto"]}</div><div class="label">Mensajes del LLM entregados</div></div>
+    <div class="card"><div class="num">{est["llm_degradado"]}</div><div class="label">Respuestas en modo degradado</div></div>
+  </div>
+  <p class="meta">Contadores del front desde su ultimo reinicio.</p>
 
   <h2>Metricas generales</h2>
   <div class="cards">
