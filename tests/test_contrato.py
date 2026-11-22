@@ -46,7 +46,7 @@ def test_prediccion_exitosa_muestra_probabilidad_version_e_historial(monkeypatch
     assert "Modelo v1" in r.text
     assert "replica dominio1" in r.text
     assert "Audífonos" in r.text          # historial
-    assert "U103808 (Coquimbo)" in r.text  # lista de clientes
+    assert "Coquimbo (1)" in r.text  # selector de region con su cantidad de clientes
 
 
 def test_ia_caida_muestra_el_detail_del_dominio(monkeypatch):
