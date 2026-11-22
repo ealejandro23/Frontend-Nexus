@@ -139,22 +139,36 @@ def recomendar(usuario_id: str) -> tuple[list[dict], bool, str | None]:
     return productos, True, motivo or "Habia pocas recomendaciones personalizadas; se completo con los mas vendidos."
 
 
+def _tono(texto: str) -> int:
+    """Tono estable (0-359) por categoria, para la miniatura de cada producto."""
+    return sum(ord(c) * (i + 1) for i, c in enumerate(texto.lower())) % 360
+
+
 def recomendaciones_html(usuario_id: str) -> str:
     productos, reserva, motivo = recomendar(usuario_id)
     if len(productos) < MIN_PRODUCTOS:
-        return ('<p class="error">No se pudieron cargar recomendaciones de productos en este momento. '
-                'Intenta de nuevo en unos segundos.</p>')
+        return ('<section class="bloque"><p class="error">No se pudieron cargar recomendaciones de productos '
+                'en este momento. Intenta de nuevo en unos segundos.</p></section>')
     contar("entregadas")
     if reserva:
         contar("con_reserva")
-    aviso = (f'<p class="aviso"><strong>Lista de reserva (mas vendidos).</strong> {escape(motivo or "")}</p>'
-             if reserva else '<p class="meta">Recomendaciones personalizadas segun su historial de compras y navegacion.</p>')
+    if reserva:
+        aviso = (f'<p class="aviso"><strong>Lista de reserva (mas vendidos).</strong> {escape(motivo or "")}</p>')
+        porque = "Entre los más vendidos de la tienda"
+    else:
+        aviso = '<p class="nota">Personalizadas según su historial de compras y navegación.</p>'
+        porque = "Comprado junto a productos de su historial"
     tarjetas = "".join(
-        f'<li class="producto"><span class="nombre">{escape(p["nombre"])}</span>'
-        f'<span class="meta">{escape(p["categoria"])} &middot; {escape(p["sku"])}</span></li>'
+        f'<li class="producto" style="--tono:{_tono(p["categoria"])}">'
+        f'<span class="miniatura" aria-hidden="true">{escape(p["categoria"][:2])}</span>'
+        f'<span class="nombre">{escape(p["nombre"])}</span>'
+        f'<span class="categoria">{escape(p["categoria"])}</span>'
+        f'<span class="motivo">{porque}</span>'
+        f'<span class="sku">{escape(p["sku"])}</span></li>'
         for p in productos
     )
-    return f'<h2>Productos recomendados ({len(productos)})</h2>{aviso}<ul class="productos">{tarjetas}</ul>'
+    return (f'<section class="bloque"><div class="bloque-titulo"><h2>Productos recomendados ({len(productos)})</h2>'
+            f'</div>{aviso}<ul class="productos">{tarjetas}</ul></section>')
 
 
 # ---------------------------------------------------------------------------
@@ -171,26 +185,42 @@ def iniciar_campana(usuario_id: str) -> str | None:
     return job_id if isinstance(job_id, str) and JOB_ID_VALIDO.match(job_id) else None
 
 
+ICONO_CORREO = ('<svg class="icono" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4z" fill="none" '
+                'stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m4 7 8 6 8-6" fill="none" '
+                'stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>')
+
+
 def llm_html(usuario_id: str) -> str:
+    cabecera = (f'<div class="bloque-titulo"><h2>Mensaje personalizado</h2>'
+                f'<span class="etiqueta">Redactado por IA (NVIDIA) &middot; llega por la cola</span></div>')
     job_id = iniciar_campana(usuario_id)
     if not job_id:
         contar("llm_degradado")
-        return ('<h2>Mensaje personalizado</h2><div class="llm aviso"><strong>Modo degradado:</strong> '
-                'el servicio de mensajes personalizados no esta disponible. Las recomendaciones siguen funcionando.</div>')
+        return (f'<section class="bloque">{cabecera}<div class="correo aviso"><strong>Modo degradado:</strong> '
+                'el servicio de mensajes personalizados no esta disponible. Las recomendaciones siguen funcionando.'
+                '</div></section>')
     intentos = max(1, LLM_ESPERA_MAX_S // LLM_INTERVALO_S)
     # job_id ya paso por JOB_ID_VALIDO (solo letras, numeros, _ y -): es seguro dentro del script.
-    return f"""<h2>Mensaje personalizado</h2>
-<div id="llm" class="llm"><span class="meta">Generando mensaje personalizado con IA...</span></div>
+    return f"""<section class="bloque">{cabecera}
+<div id="llm" class="correo esperando" aria-live="polite">
+  <div class="correo-cabecera">{ICONO_CORREO}<span>Para: cliente seudonimizado</span></div>
+  <p class="correo-asunto">Generando mensaje personalizado...</p>
+  <span class="linea-carga"></span><span class="linea-carga corta"></span>
+</div></section>
 <script>
 (function () {{
   const caja = document.getElementById("llm");
   const job = "{job_id}";
   let intento = 0;
-  function mostrar(clase, titulo, texto) {{
-    caja.className = "llm " + clase;
-    caja.textContent = "";
-    if (titulo) {{ const t = document.createElement("strong"); t.textContent = titulo; caja.appendChild(t); }}
-    const p = document.createElement("p"); p.textContent = texto; caja.appendChild(p);
+  function mostrar(estado, titulo, texto) {{
+    caja.className = "correo " + estado;
+    caja.querySelectorAll(".linea-carga").forEach(e => e.remove());
+    const asunto = caja.querySelector(".correo-asunto");
+    asunto.textContent = titulo;
+    const cuerpo = document.createElement("p");
+    cuerpo.className = "correo-cuerpo";
+    cuerpo.textContent = texto;
+    caja.appendChild(cuerpo);
   }}
   function consultar() {{
     intento += 1;
@@ -198,14 +228,117 @@ def llm_html(usuario_id: str) -> str:
       .then(r => r.json())
       .then(d => {{
         if (d.estado === "pendiente" && intento < {intentos}) {{ setTimeout(consultar, {LLM_INTERVALO_S * 1000}); return; }}
-        if (d.estado === "listo") {{ mostrar("ok", d.asunto || "", d.mensaje || ""); return; }}
-        mostrar("aviso", "Modo degradado: ", d.motivo || "El mensaje personalizado no llego a tiempo.");
+        if (d.estado === "listo") {{ mostrar("ok", d.asunto || "Mensaje para el cliente", d.mensaje || ""); return; }}
+        mostrar("aviso", "Modo degradado", d.motivo || "El mensaje personalizado no llego a tiempo.");
       }})
-      .catch(() => mostrar("aviso", "Modo degradado: ", "No se pudo consultar el mensaje personalizado."));
+      .catch(() => mostrar("aviso", "Modo degradado", "No se pudo consultar el mensaje personalizado."));
   }}
   setTimeout(consultar, {LLM_INTERVALO_S * 1000});
 }})();
 </script>"""
+
+
+ESTILOS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap');
+:root {
+  --papel: #f4f3ef; --panel: #ffffff; --tinta: #1a201d; --tinta-2: #4f5b55; --tinta-3: #6d7872;
+  --linea: #e1e3dd; --marca: #0f6b4f; --marca-osc: #0b523c; --marca-suave: #e5f1ec;
+  --aviso: #fff4dc; --aviso-tinta: #6a4a00; --error: #fbe9e5; --error-tinta: #9c2f1b;
+  --radio: 10px; --sombra: 0 1px 2px rgba(26,32,29,.06), 0 6px 18px rgba(26,32,29,.06);
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--papel); color: var(--tinta); font: 15px/1.55 'IBM Plex Sans', system-ui, sans-serif; }
+::selection { background: var(--marca); color: #fff; }
+a { color: var(--marca); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--marca); outline-offset: 2px; border-radius: 4px; }
+.barra { background: var(--panel); border-bottom: 1px solid var(--linea); }
+.barra-interior { max-width: 1180px; margin: 0 auto; padding: .85rem 1.25rem; display: flex; align-items: center; gap: 2rem; }
+.marca { font-weight: 700; font-size: 1.15rem; letter-spacing: -.01em; color: var(--tinta); text-decoration: none; }
+.marca span { color: var(--marca); }
+.barra nav { display: flex; gap: .25rem; }
+.barra nav a { color: var(--tinta-2); text-decoration: none; font-weight: 500; padding: .4rem .75rem; border-radius: 6px; }
+.barra nav a:hover { background: var(--papel); color: var(--tinta); }
+.barra nav a[aria-current="page"] { background: var(--marca-suave); color: var(--marca-osc); }
+.contenido { max-width: 1180px; margin: 0 auto; padding: 1.75rem 1.25rem 3rem; display: grid;
+  grid-template-columns: 300px minmax(0, 1fr); gap: 1.75rem; align-items: start; }
+.lateral { position: sticky; top: 1.25rem; background: var(--panel); border: 1px solid var(--linea);
+  border-radius: var(--radio); box-shadow: var(--sombra); padding: 1.25rem; }
+h1 { font-size: 1.3rem; line-height: 1.25; margin: 0 0 .35rem; letter-spacing: -.015em; }
+.lateral > p { color: var(--tinta-2); margin: 0 0 1.25rem; font-size: .92rem; }
+form { display: grid; gap: 1rem; }
+label { display: grid; gap: .35rem; font-weight: 600; font-size: .85rem; color: var(--tinta-2); }
+input, select { font: inherit; color: var(--tinta); background: var(--panel); border: 1px solid #cfd4cc;
+  border-radius: 8px; padding: .6rem .7rem; width: 100%; }
+input:focus, select:focus { outline: none; border-color: var(--marca); box-shadow: 0 0 0 3px var(--marca-suave); }
+input::placeholder { color: var(--tinta-3); }
+.ayuda { font-weight: 400; color: var(--tinta-3); font-size: .8rem; }
+button { font: inherit; font-weight: 600; background: var(--marca); color: #fff; border: 0; border-radius: 8px;
+  padding: .7rem 1rem; cursor: pointer; transition: background .15s ease-out; }
+button:hover { background: var(--marca-osc); }
+button:disabled { opacity: .6; cursor: progress; }
+.principal { display: grid; gap: 1.25rem; min-width: 0; }
+.bloque { background: var(--panel); border: 1px solid var(--linea); border-radius: var(--radio);
+  box-shadow: var(--sombra); padding: 1.25rem 1.35rem; }
+.bloque-titulo { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: .75rem; }
+h2 { font-size: 1.02rem; margin: 0; letter-spacing: -.005em; }
+.etiqueta { font-size: .8rem; color: var(--tinta-3); }
+.nota { color: var(--tinta-2); font-size: .9rem; margin: 0 0 1rem; }
+.aviso { background: var(--aviso); color: var(--aviso-tinta); padding: .7rem .85rem; border-radius: 8px; margin: 0 0 1rem; font-size: .92rem; }
+.error { background: var(--error); color: var(--error-tinta); padding: .7rem .85rem; border-radius: 8px; margin: 0; font-size: .92rem; }
+.vacio { padding: 2.5rem 1.5rem; text-align: left; }
+.vacio h2 { font-size: 1.15rem; margin-bottom: .5rem; }
+.vacio p { color: var(--tinta-2); max-width: 60ch; margin: 0 0 .5rem; }
+.resumen { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .25rem 1.5rem; align-items: center; }
+.prob { font-size: 2.6rem; font-weight: 700; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; margin: 0; color: var(--marca-osc); }
+.veredicto { font-weight: 600; margin: 0; }
+.barra-prob { height: 8px; border-radius: 99px; background: var(--papel); overflow: hidden; grid-column: 1 / -1; margin-top: .9rem; }
+.barra-prob span { display: block; height: 100%; background: var(--marca); border-radius: inherit; }
+.meta { color: var(--tinta-3); font-size: .84rem; margin: .75rem 0 0; grid-column: 1 / -1; }
+.chip { display: inline-block; font-size: .78rem; font-weight: 600; padding: .12rem .5rem; border-radius: 99px;
+  background: var(--marca-suave); color: var(--marca-osc); }
+.chip.reserva { background: var(--aviso); color: var(--aviso-tinta); }
+.productos { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr)); gap: .85rem; }
+.producto { border: 1px solid var(--linea); border-radius: 9px; padding: .8rem; display: grid; gap: .2rem; align-content: start;
+  transition: border-color .15s ease-out, box-shadow .15s ease-out; }
+.producto:hover { border-color: #c9cfc6; box-shadow: var(--sombra); }
+.miniatura { height: 64px; border-radius: 7px; display: grid; place-items: center; margin-bottom: .45rem;
+  background: hsl(var(--tono) 45% 93%); color: hsl(var(--tono) 40% 32%); font-weight: 700; font-size: 1.05rem;
+  text-transform: uppercase; letter-spacing: .04em; }
+.producto .nombre { font-weight: 600; line-height: 1.3; }
+.producto .categoria { color: var(--tinta-2); font-size: .85rem; }
+.producto .motivo { color: var(--marca-osc); font-size: .8rem; }
+.producto .sku { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: .75rem; color: var(--tinta-3); }
+.correo { border: 1px solid var(--linea); border-radius: 9px; padding: 1rem 1.1rem; }
+.correo-cabecera { display: flex; align-items: center; gap: .45rem; color: var(--tinta-3); font-size: .82rem;
+  padding-bottom: .6rem; border-bottom: 1px solid var(--linea); margin-bottom: .7rem; }
+.icono { width: 18px; height: 18px; }
+.correo-asunto { font-weight: 600; margin: 0 0 .35rem; }
+.correo-cuerpo { margin: 0; white-space: pre-line; color: var(--tinta-2); max-width: 70ch; }
+.correo.ok { background: #fbfdfc; }
+.correo.aviso { background: var(--aviso); color: var(--aviso-tinta); border-color: #f0dfb3; }
+.correo.aviso .correo-cuerpo { color: var(--aviso-tinta); }
+.linea-carga { display: block; height: 10px; border-radius: 99px; margin-top: .55rem; width: 92%;
+  background: linear-gradient(90deg, var(--papel) 0%, #e9ebe6 50%, var(--papel) 100%); background-size: 200% 100%;
+  animation: carga 1.2s ease-out infinite; }
+.linea-carga.corta { width: 60%; }
+@keyframes carga { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 600; color: var(--tinta-3); font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
+th, td { padding: .55rem .5rem; border-bottom: 1px solid var(--linea); }
+tbody tr:last-child td { border-bottom: 0; }
+.tabla { overflow-x: auto; }
+@media (max-width: 860px) { .contenido { grid-template-columns: minmax(0, 1fr); padding: 1rem 1rem 2rem; gap: 1rem; } .lateral { position: static; } .barra-interior { gap: 1rem; } .prob { font-size: 2.1rem; } }
+@media (prefers-reduced-motion: reduce) { .linea-carga { animation: none; } * { transition: none !important; } }
+"""
+
+
+def barra_superior(activa: str) -> str:
+    def enlace(href, texto):
+        actual = ' aria-current="page"' if href == activa else ""
+        return f'<a href="{href}"{actual}>{texto}</a>'
+    return (f'<header class="barra"><div class="barra-interior"><a class="marca" href="/">Nexo<span>.</span></a>'
+            f'<nav>{enlace("/", "Recomendador")}{enlace("/dashboard", "Dashboard")}</nav></div></header>')
 
 
 def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") -> str:
@@ -225,68 +358,68 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     if not isinstance(categorias, list) or not categorias:
         categorias = CATEGORIAS_POR_DEFECTO
 
-    opciones_usuario = "".join(
-        f'<option value="{escape(str(u["usuario_id"]))}"{" selected" if str(u["usuario_id"]) == usuario_sel else ""}>'
-        f'{escape(str(u["usuario_id"]))}{" (" + escape(str(u["region"])) + ")" if u.get("region") else ""}</option>'
+    # Buscador con sugerencias: con miles de clientes, un <select> no se puede recorrer.
+    sugerencias = "".join(
+        f'<option value="{escape(str(u["usuario_id"]))}">'
+        f'{escape(str(u["usuario_id"]))}{" (" + escape(str(u["region"]).title()) + ")" if u.get("region") else ""}</option>'
         for u in usuarios
     )
-    campo_usuario = (
-        f'<select name="usuario_id" required><option value="">Elige un cliente</option>{opciones_usuario}</select>'
-        if usuarios else
-        f'<input name="usuario_id" required placeholder="Por ejemplo, U103808" value="{escape(usuario_sel)}">'
-    )
     opciones_categoria = "".join(
-        f'<option{" selected" if c == categoria_sel else ""}>{escape(str(c))}</option>' for c in categorias
+        f'<option value="{escape(str(c))}"{" selected" if str(c) == categoria_sel else ""}>{escape(str(c).capitalize())}</option>'
+        for c in categorias
     )
     avisos_html = "".join(f'<p class="error">{escape(a)}</p>' for a in avisos)
+    total = f"{len(usuarios):,}".replace(",", ".") if usuarios else ""
+    ayuda = f'<span class="ayuda">Escribe el código; hay {total} clientes.</span>' if usuarios else ""
+    if not resultado:
+        resultado = ('<section class="bloque vacio"><h2>Elige un cliente para ver su recomendación</h2>'
+                     '<p>El modelo calcula la probabilidad de que compre en la categoría elegida y el sistema arma '
+                     'entre 4 y 8 productos para mostrarle. En paralelo, la IA redacta el mensaje de la campaña.</p>'
+                     '<p>Prueba con U100000 o U103814.</p></section>')
 
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nexo - Recomendador de compras</title>
-<style>
-  body {{ font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #17201c; }}
-  nav {{ margin-bottom: 1.5rem; }}
-  nav a {{ margin-right: 1rem; color: #0f6b4f; text-decoration: none; font-weight: 600; }}
-  form {{ display: grid; gap: .75rem; padding: 1rem; border: 1px solid #d5ddd9; border-radius: 8px; }}
-  select, input, button {{ font: inherit; padding: .5rem; }}
-  button {{ background: #0f6b4f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }}
-  .prob {{ font-size: 3rem; font-weight: 700; margin: 1rem 0 0; }}
-  .meta {{ color: #5b6862; font-size: .9rem; }}
-  .error {{ background: #fbe9e5; color: #a3341f; padding: .75rem; border-radius: 6px; }}
-  .aviso {{ background: #fff6e0; color: #6b4a00; padding: .75rem; border-radius: 6px; }}
-  .productos {{ list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .75rem; }}
-  .producto {{ border: 1px solid #d5ddd9; border-radius: 8px; padding: .75rem; display: grid; gap: .25rem; }}
-  .producto .nombre {{ font-weight: 600; }}
-  .llm {{ padding: .75rem; border-radius: 6px; border: 1px solid #d5ddd9; }}
-  .llm.ok {{ background: #e8f4f0; }}
-  .llm p {{ margin: .4rem 0 0; white-space: pre-line; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
-  th, td {{ text-align: left; padding: .4rem; border-bottom: 1px solid #d5ddd9; }}
-</style></head>
+<style>{ESTILOS}</style></head>
 <body>
-  <nav><a href="/">Recomendador</a><a href="/dashboard">Dashboard</a></nav>
-  <h1>Recomendador de compras</h1>
-  <p>Elige un cliente y una categoria para estimar que tan probable es que compre en ella.</p>
-  {avisos_html}
-  <form method="post" action="/predecir">
-    <label>Cliente {campo_usuario}</label>
-    <label>Categoria <select name="categoria">{opciones_categoria}</select></label>
-    <button type="submit">Calcular probabilidad</button>
-  </form>
-  {resultado}
+{barra_superior("/")}
+<main class="contenido">
+  <aside class="lateral">
+    <h1>Recomendador de compras</h1>
+    <p>Qué productos mostrarle a cada cliente y qué mensaje enviarle.</p>
+    {avisos_html}
+    <form method="post" action="/predecir" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Calculando...'">
+      <label>Cliente
+        <input name="usuario_id" list="clientes" required autocomplete="off" spellcheck="false"
+               placeholder="Por ejemplo, U103808" value="{escape(usuario_sel)}">
+        {ayuda}
+      </label>
+      <datalist id="clientes">{sugerencias}</datalist>
+      <label>Categoría
+        <select name="categoria">{opciones_categoria}</select>
+      </label>
+      <button type="submit">Calcular probabilidad</button>
+    </form>
+  </aside>
+  <div class="principal">
+    {resultado}
+  </div>
+</main>
 </body></html>"""
 
 
 def historial_html(usuario_id: str) -> str:
+    def envolver(contenido: str) -> str:
+        return f'<section class="bloque"><div class="bloque-titulo"><h2>Historial de compras</h2></div>{contenido}</section>'
     try:
         filas, _ = llamar("GET", f"{DOMINIO}/usuarios/{quote(usuario_id, safe='')}/historial")
     except ErrorServicio as e:
-        return f'<p class="error">No se pudo cargar el historial. {escape(str(e))}</p>'
+        return envolver(f'<p class="error">No se pudo cargar el historial. {escape(str(e))}</p>')
     if not filas:
-        return "<p class=\"meta\">Este cliente todavia no tiene compras registradas.</p>"
+        return envolver('<p class="nota">Este cliente todavia no tiene compras registradas.</p>')
     if not isinstance(filas, list) or not all(isinstance(f, dict) for f in filas):
-        return f'<p class="error">No se pudo cargar el historial. {RESPUESTA_INESPERADA}</p>'
+        return envolver(f'<p class="error">No se pudo cargar el historial. {RESPUESTA_INESPERADA}</p>')
     columnas = ["producto", "categoria", "fecha", "cantidad", "total", "estado"]
     cabecera = "".join(f"<th>{escape(str(c))}</th>" for c in columnas)
     cuerpo = ""
@@ -295,7 +428,7 @@ def historial_html(usuario_id: str) -> str:
         for c in columnas:
             celdas += f"<td>{escape(str(f.get(c, '-')))}</td>"
         cuerpo += f"<tr>{celdas}</tr>"
-    return f"<table><thead><tr>{cabecera}</tr></thead><tbody>{cuerpo}</tbody></table>"
+    return envolver(f'<div class="tabla"><table><thead><tr>{cabecera}</tr></thead><tbody>{cuerpo}</tbody></table></div>')
 
 
 @app.get("/health")
@@ -335,24 +468,33 @@ def estado_llm(job_id: str, intento: int = 1):
 
 @app.post("/predecir", response_class=HTMLResponse)
 def predecir(usuario_id: str = Form(...), categoria: str = Form(...)):
+    usuario_id = usuario_id.strip()
     try:
         res, ms = llamar("POST", f"{DOMINIO}/predicciones", json={"usuario_id": usuario_id, "categoria": categoria})
         prob = float(res["probabilidad_compra"])
-        veredicto = "Conviene recomendarle esta categoria." if res.get("prediccion") == 1 \
-            else "No conviene recomendarle esta categoria por ahora."
+        veredicto = "Conviene recomendarle esta categoría." if res.get("prediccion") == 1 \
+            else "No conviene recomendarle esta categoría por ahora."
+        origen = res.get("origen")
+        chip = ('<span class="chip">SageMaker</span>' if origen == "sagemaker" else
+                '<span class="chip reserva">Reserva: modelo local</span>' if origen == "reserva" else "")
         detalles = [f"Modelo {res.get('version_modelo', 'desconocido')}",
                     f"prediccion n. {res.get('prediccion_id', '?')}", f"{ms:.0f} ms"]
         if res.get("instancia"):
             detalles.append(f"replica {res['instancia']}")
-        resultado = (f'<p class="prob">{prob:.0%}</p><p>{veredicto}</p>'
-                     f'<p class="meta">{escape(", ".join(detalles))}</p>')
+        ancho = max(0.0, min(1.0, prob)) * 100
+        resultado = (f'<section class="bloque"><div class="bloque-titulo"><h2>Cliente {escape(usuario_id)} '
+                     f'&middot; {escape(categoria.capitalize())}</h2>{chip}</div>'
+                     f'<div class="resumen"><p class="prob">{prob:.0%}</p><div><p class="veredicto">{veredicto}</p>'
+                     f'<p class="nota" style="margin:0">Probabilidad de que compre en esta categoría.</p></div>'
+                     f'<div class="barra-prob"><span style="width:{ancho:.0f}%"></span></div>'
+                     f'<p class="meta">{escape(", ".join(detalles))}</p></div></section>')
     except ErrorServicio as e:
-        resultado = f'<p class="error">{escape(str(e))}</p>'
+        resultado = f'<section class="bloque"><p class="error">{escape(str(e))}</p></section>'
     except (KeyError, TypeError, ValueError):
-        resultado = f'<p class="error">{RESPUESTA_INESPERADA}</p>'
+        resultado = f'<section class="bloque"><p class="error">{RESPUESTA_INESPERADA}</p></section>'
     resultado += recomendaciones_html(usuario_id)
     resultado += llm_html(usuario_id)
-    resultado += f"<h2>Historial de compras</h2>{historial_html(usuario_id)}"
+    resultado += historial_html(usuario_id)
     return pagina(usuario_sel=usuario_id, categoria_sel=categoria, resultado=resultado)
 
 
@@ -445,9 +587,16 @@ def dashboard():
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 <style>
-  body {{ font-family: system-ui, sans-serif; max-width: 1200px; margin: 2rem auto; padding: 0 1rem; color: #17201c; }}
-  nav {{ margin-bottom: 1.5rem; }}
-  nav a {{ margin-right: 1rem; color: #0f6b4f; text-decoration: none; font-weight: 600; }}
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+  body {{ font-family: 'IBM Plex Sans', system-ui, sans-serif; margin: 0; background: #f4f3ef; color: #1a201d; }}
+  .tablero {{ max-width: 1200px; margin: 0 auto; padding: 1.75rem 1.25rem 3rem; }}
+  .barra {{ background: #fff; border-bottom: 1px solid #e1e3dd; }}
+  .barra-interior {{ max-width: 1200px; margin: 0 auto; padding: .85rem 1.25rem; display: flex; align-items: center; gap: 2rem; }}
+  .marca {{ font-weight: 700; font-size: 1.15rem; color: #1a201d; text-decoration: none; }}
+  .marca span {{ color: #0f6b4f; }}
+  .barra nav {{ display: flex; gap: .25rem; margin: 0; }}
+  .barra nav a {{ color: #4f5b55; text-decoration: none; font-weight: 500; padding: .4rem .75rem; border-radius: 6px; margin: 0; }}
+  .barra nav a[aria-current="page"] {{ background: #e5f1ec; color: #0b523c; }}
   .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }}
   .card {{ background: linear-gradient(135deg, #f4f8f6, #e8f4f0); border: 1px solid #d5ddd9; border-radius: 12px; padding: 1.5rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.06); }}
   .card .num {{ font-size: 2.4rem; font-weight: 800; color: #0f6b4f; margin-bottom: .3rem; }}
@@ -467,7 +616,8 @@ def dashboard():
   .metrica .lbl {{ font-size: .8rem; color: #5b6862; }}
 </style></head>
 <body>
-  <nav><a href="/">Recomendador</a><a href="/dashboard">Dashboard</a></nav>
+{barra_superior("/dashboard")}
+<div class="tablero">
   <h1>Dashboard - Nexo Recommender</h1>
   <div class="health">{health_html}</div>
 
@@ -601,4 +751,5 @@ new Chart(document.getElementById('topChart'), {{
   options: {{ responsive: true, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }} }}
 }});
 </script>
+</div>
 </body></html>"""
