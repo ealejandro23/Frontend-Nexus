@@ -316,6 +316,25 @@ button { font: inherit; font-weight: 600; background: var(--marca); color: #fff;
   padding: .7rem 1rem; cursor: pointer; transition: background .15s ease-out; }
 button:hover { background: var(--marca-osc); }
 button:disabled { opacity: .6; cursor: progress; }
+.rotulo-campo { display: block; font-weight: 600; font-size: .85rem; color: var(--tinta-2); margin-bottom: .35rem; }
+.perfiles { display: grid; gap: .45rem; }
+button.perfil { display: grid; gap: .1rem; text-align: left; background: var(--panel); color: var(--tinta); border: 1px solid var(--linea); padding: .6rem .75rem; font-weight: 400; }
+button.perfil:hover { background: var(--marca-suave); border-color: #b9d8cb; }
+.perfil-titulo { font-weight: 600; }
+.perfil-caso { color: var(--marca-osc); font-size: .8rem; }
+.perfil-detalle { color: var(--tinta-3); font-size: .78rem; }
+.elegido { margin: 0; padding: .6rem .75rem; border: 1px dashed #cfd4cc; border-radius: 8px; color: var(--tinta-3); font-size: .88rem; }
+.elegido.listo { border-style: solid; border-color: #b9d8cb; background: #fbfdfc; color: var(--tinta); display: grid; gap: .15rem; }
+.codigo { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: .76rem; color: var(--tinta-3); }
+.filtros { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; margin-bottom: .9rem; }
+.tabla-clientes { max-height: 360px; overflow: auto; border: 1px solid var(--linea); border-radius: 8px; }
+.tabla-clientes thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tabla-clientes tbody tr { cursor: pointer; }
+.tabla-clientes tbody tr:hover { background: var(--papel); }
+.tabla-clientes tbody tr.activo { background: var(--marca-suave); }
+.tabla-clientes tbody tr:focus-visible { outline: 2px solid var(--marca); outline-offset: -2px; }
+details.cambiar > summary { cursor: pointer; font-weight: 600; color: var(--marca-osc); padding: .2rem 0; }
+details.cambiar[open] > summary { margin-bottom: .75rem; }
 .fila-campo { display: flex; gap: .5rem; }
 .fila-campo input { flex: 1; min-width: 0; }
 button.secundario { background: var(--panel); color: var(--marca-osc); border: 1px solid #cfd4cc; padding: .6rem .8rem; font-weight: 600; }
@@ -411,8 +430,7 @@ def region_oficial(bruto: str) -> str:
 
 
 def agrupar_regiones(usuarios: list[dict], usuario_sel: str = "") -> tuple[list, dict, str]:
-    """Agrupa clientes por region normalizada (los datos traen "tarapaca" y "tarapacá", etc.).
-    Devuelve ([(clave, (etiqueta, [ids]))] ordenado, {id: etiqueta}, clave de la region del cliente elegido)."""
+    """[(clave, (region oficial, [ids]))] ordenado, {id: region} y la clave de la region del cliente elegido."""
     grupos: dict[str, list] = {}
     for u in usuarios:
         etiqueta = region_oficial(texto_valido(u.get("region")) or "Sin región")
@@ -428,16 +446,120 @@ def agrupar_regiones(usuarios: list[dict], usuario_sel: str = "") -> tuple[list,
     return regiones, region_de, region_sel
 
 
+_clientes_cache = {"datos": [], "ts": 0.0}
+
+
+def clientes() -> list[dict]:
+    """Clientes con datos reales para elegirlos sin depender del código (en memoria 5 minutos)."""
+    if _clientes_cache["datos"] and time.monotonic() - _clientes_cache["ts"] < 300:
+        return _clientes_cache["datos"]
+    datos, _ = llamar("GET", f"{DOMINIO}/usuarios")
+    lista = []
+    for u in datos if isinstance(datos, list) else []:
+        if not isinstance(u, dict) or "usuario_id" not in u:
+            continue
+        lista.append({
+            "id": str(u["usuario_id"]),
+            "region": region_oficial(texto_valido(u.get("region")) or "Sin región"),
+            "comuna": texto_valido(u.get("comuna")) or "",
+            "edad": u.get("edad") if isinstance(u.get("edad"), int) else None,
+            "pedidos": int(u.get("pedidos") or 0) if isinstance(u.get("pedidos"), (int, float)) else 0,
+            "total": float(u.get("total_gastado") or 0) if isinstance(u.get("total_gastado"), (int, float)) else 0.0,
+            "marketing": bool(u.get("acepta_marketing")),
+        })
+    if lista:
+        _clientes_cache.update(datos=lista, ts=time.monotonic())
+    return lista
+
+
+def describir(c: dict) -> str:
+    """"Concepción, Biobío · 47 años · 3 pedidos"."""
+    lugar = ", ".join(x for x in (c.get("comuna"), c.get("region")) if x)
+    partes = [lugar or "Sin ubicación"]
+    if c.get("edad"):
+        partes.append(f'{c["edad"]} años')
+    partes.append(f'{c["pedidos"]} pedido' + ("" if c["pedidos"] == 1 else "s"))
+    return " · ".join(partes)
+
+
+def perfiles_demo(lista: list[dict]) -> list[tuple[str, str, dict]]:
+    """Clientes reales representativos de cada caso que se muestra en la demo."""
+    con = [c for c in lista if c["marketing"]]
+    sin = [c for c in lista if not c["marketing"]]
+    perfiles = []
+    frecuente = max(con, key=lambda c: (c["pedidos"], c["total"]), default=None)
+    if frecuente:
+        perfiles.append(("Comprador frecuente", "Recomendaciones personalizadas", frecuente))
+    nuevo = next((c for c in con if c["pedidos"] == 0), None) or next((c for c in lista if c["pedidos"] == 0), None)
+    if nuevo:
+        perfiles.append(("Cliente nuevo", "Sin compras: lista de más vendidos", nuevo))
+    sin_cons = max(sin, key=lambda c: (c["pedidos"], c["total"]), default=None)
+    if sin_cons:
+        perfiles.append(("Sin consentimiento", "No se usa su historial (RN2)", sin_cons))
+    return perfiles
+
+
+JS_ELEGIR = r"""
+(function () {
+  const $ = id => document.getElementById(id);
+  const oculto = $("cliente"), elegido = $("cliente-elegido"), calcular = $("calcular");
+  const filtros = ["f-region", "f-compras", "f-marketing", "f-buscar"].map($);
+  const cuerpo = $("tabla-clientes"), contador = $("contador-clientes");
+  let todos = [];
+  const pesos = n => "$ " + Math.round(n).toLocaleString("es-CL");
+  const describir = c => [[c.comuna, c.region].filter(Boolean).join(", ") || "Sin ubicación",
+    c.edad ? c.edad + " años" : null, c.pedidos + (c.pedidos === 1 ? " pedido" : " pedidos")].filter(Boolean).join(" · ");
+  function elegir(c) {
+    oculto.value = c.id;
+    elegido.innerHTML = "";
+    const fuerte = document.createElement("strong"); fuerte.textContent = describir(c);
+    const codigo = document.createElement("span"); codigo.className = "codigo"; codigo.textContent = c.id;
+    elegido.append(fuerte, codigo);
+    elegido.classList.add("listo");
+    calcular.disabled = false;
+    cuerpo.querySelectorAll("tr").forEach(tr => tr.classList.toggle("activo", tr.dataset.id === c.id));
+  }
+  function pintar() {
+    const [region, compras, marketing, buscar] = filtros.map(f => f.value.trim().toLowerCase());
+    const lista = todos.filter(c =>
+      (!region || c.region === region) &&
+      (!compras || (compras === "con" ? c.pedidos > 0 : c.pedidos === 0)) &&
+      (!marketing || (marketing === "si" ? c.marketing : !c.marketing)) &&
+      (!buscar || c.comuna.toLowerCase().includes(buscar) || c.id.toLowerCase().includes(buscar)))
+      .sort((a, b) => b.pedidos - a.pedidos || b.total - a.total);
+    const visibles = lista.slice(0, 40);
+    cuerpo.replaceChildren(...visibles.map(c => {
+      const tr = document.createElement("tr");
+      tr.dataset.id = c.id; tr.tabIndex = 0;
+      tr.classList.toggle("activo", c.id === oculto.value);
+      [[c.comuna || "-", ""], [c.region, ""], [c.edad ? c.edad : "-", "num"], [c.pedidos, "num"],
+       [pesos(c.total), "num"], [c.marketing ? "Sí" : "No", ""], [c.id, "codigo"]].forEach(([v, cls]) => {
+        const td = document.createElement("td"); td.textContent = v; if (cls) td.className = cls; tr.appendChild(td);
+      });
+      tr.addEventListener("click", () => elegir(c));
+      tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); elegir(c); } });
+      return tr;
+    }));
+    contador.textContent = lista.length > visibles.length
+      ? "Mostrando " + visibles.length + " de " + lista.length.toLocaleString("es-CL") + " clientes. Usa los filtros para acotar."
+      : lista.length ? lista.length + " clientes" : "Ningún cliente cumple los filtros.";
+  }
+  filtros.forEach(f => f.addEventListener(f.tagName === "INPUT" ? "input" : "change", pintar));
+  calcular.disabled = !oculto.value;
+  fetch("/clientes.json").then(r => r.json()).then(d => { todos = d; pintar();
+    const actual = todos.find(c => c.id === oculto.value); if (actual) elegir(actual); })
+    .catch(() => { contador.textContent = "No se pudo cargar la lista de clientes."; });
+})();
+"""
+
+
 def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") -> str:
     avisos = []
     try:
-        usuarios, _ = llamar("GET", f"{DOMINIO}/usuarios")
+        lista = clientes()
     except ErrorServicio as e:
-        usuarios = []
+        lista = []
         avisos.append(f"No se pudo cargar la lista de clientes. {e}")
-    if not isinstance(usuarios, list):
-        usuarios = []
-    usuarios = [u for u in usuarios if isinstance(u, dict) and "usuario_id" in u]
     try:
         categorias, _ = llamar("GET", f"{DOMINIO}/categorias")
     except ErrorServicio:
@@ -445,30 +567,41 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     if not isinstance(categorias, list) or not categorias:
         categorias = CATEGORIAS_POR_DEFECTO
 
-    # Selector de cliente en dos pasos: region (sin repetir) y luego el codigo del cliente.
-    regiones, region_de, region_sel = agrupar_regiones(usuarios, usuario_sel)
-    opciones_region = f'<option value="">Todas las regiones ({len(usuarios):,})</option>'.replace(",", ".") + "".join(
-        f'<option value="{escape(clave)}"{" selected" if clave == region_sel else ""}>'
-        f'{escape(etiqueta)} ({len(ids):,})</option>'.replace(",", ".")
-        for clave, (etiqueta, ids) in regiones
-    )
-    sugerencias = ""  # el script llena la lista segun la region (asi la pagina no repite los 4.000 codigos)
-    datos_clientes = json.dumps({"regiones": {clave: ids for clave, (_, ids) in regiones},
-                                 "etiqueta": {i: etiqueta for i, etiqueta in region_de.items()}},
-                                ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    conteo: dict[str, int] = {}
+    for c in lista:
+        conteo[c["region"]] = conteo.get(c["region"], 0) + 1
+    opciones_region = "".join(
+        f'<option value="{escape(r.lower())}">{escape(r)} ({n:,})</option>'.replace(",", ".")
+        for r, n in sorted(conteo.items()))
     opciones_categoria = "".join(
         f'<option value="{escape(str(c))}"{" selected" if str(c) == categoria_sel else ""}>{escape(str(c).capitalize())}</option>'
-        for c in categorias
-    )
+        for c in categorias)
+    perfiles = "".join(
+        f'<button type="submit" class="perfil" onclick="document.getElementById(\'cliente\').value=\'{escape(c["id"])}\'">'
+        f'<span class="perfil-titulo">{escape(titulo)}</span><span class="perfil-caso">{escape(caso)}</span>'
+        f'<span class="perfil-detalle">{escape(describir(c))}</span></button>'
+        for titulo, caso, c in perfiles_demo(lista))
+    actual = next((c for c in lista if c["id"] == usuario_sel), None)
+    elegido = (f'<strong>{escape(describir(actual))}</strong><span class="codigo">{escape(actual["id"])}</span>'
+               if actual else "Elige un cliente en la tabla o usa un perfil de demo.")
     avisos_html = "".join(f'<p class="error">{escape(a)}</p>' for a in avisos)
-    seleccionado = f"{usuario_sel} · {region_de[usuario_sel]}" if usuario_sel in region_de else ""
-    ayuda = (f'<span class="ayuda" id="ayuda-cliente">{escape(seleccionado or "Escribe el código o elige uno al azar.")}</span>'
-             if usuarios else "")
-    if not resultado:
-        resultado = ('<section class="bloque vacio"><h2>Elige un cliente para ver su recomendación</h2>'
-                     '<p>El modelo calcula la probabilidad de que compre en la categoría elegida y el sistema arma '
-                     'entre 4 y 8 productos para mostrarle. En paralelo, la IA redacta el mensaje de la campaña.</p>'
-                     '<p>Filtra por región o usa <strong>Al azar</strong> para elegir un cliente.</p></section>')
+    total_txt = f"{len(lista):,}".replace(",", ".")
+
+    selector = f"""<section class="bloque elegir">
+  <div class="bloque-titulo"><h2>Elegir cliente</h2><span class="etiqueta">Datos reales del cliente; el código es solo referencia</span></div>
+  <div class="filtros">
+    <label>Región<select id="f-region"><option value="">Todas ({total_txt})</option>{opciones_region}</select></label>
+    <label>Compras<select id="f-compras"><option value="">Todos</option><option value="con">Con compras</option><option value="sin">Sin compras</option></select></label>
+    <label>Marketing<select id="f-marketing"><option value="">Todos</option><option value="si">Acepta</option><option value="no">No acepta</option></select></label>
+    <label>Buscar<input id="f-buscar" placeholder="Comuna o código" autocomplete="off"></label>
+  </div>
+  <div class="tabla tabla-clientes"><table><thead><tr><th>Comuna</th><th>Región</th><th class="num">Edad</th>
+    <th class="num">Pedidos</th><th class="num">Total comprado</th><th>Marketing</th><th>Código</th></tr></thead>
+    <tbody id="tabla-clientes"></tbody></table></div>
+  <p class="nota" id="contador-clientes" style="margin:.6rem 0 0">Cargando clientes...</p>
+</section>"""
+    if resultado:
+        selector = f'<details class="cambiar"><summary>Cambiar de cliente</summary>{selector}</details>'
 
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
@@ -482,61 +615,23 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     <h1>Recomendador de compras</h1>
     <p>Qué productos mostrarle a cada cliente y qué mensaje enviarle.</p>
     {avisos_html}
-    <form method="post" action="/predecir" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Calculando...'">
-      <label>Región
-        <select id="region">{opciones_region}</select>
-      </label>
-      <label>Cliente
-        <span class="fila-campo">
-          <input name="usuario_id" id="cliente" list="clientes" required autocomplete="off" spellcheck="false"
-                 placeholder="Ej.: U100399" value="{escape(usuario_sel)}">
-          <button type="button" class="secundario" id="al-azar">Al azar</button>
-        </span>
-        {ayuda}
-      </label>
-      <datalist id="clientes">{sugerencias}</datalist>
+    <form method="post" action="/predecir" id="form-recomendar"
+          onsubmit="const b=document.getElementById('calcular');b.disabled=true;b.textContent='Calculando...'">
+      <input type="hidden" name="usuario_id" id="cliente" value="{escape(usuario_sel)}">
+      <div class="perfiles"><span class="rotulo-campo">Perfiles de demo</span>{perfiles}</div>
+      <div><span class="rotulo-campo">Cliente elegido</span><p class="elegido{" listo" if actual else ""}" id="cliente-elegido">{elegido}</p></div>
       <label>Categoría
         <select name="categoria">{opciones_categoria}</select>
       </label>
-      <button type="submit">Calcular probabilidad</button>
+      <button type="submit" id="calcular">Calcular probabilidad</button>
     </form>
   </aside>
   <div class="principal">
+    {selector}
     {resultado}
   </div>
 </main>
-<script>
-(function () {{
-  const D = {datos_clientes};
-  const region = document.getElementById("region"), cliente = document.getElementById("cliente");
-  const lista = document.getElementById("clientes"), ayuda = document.getElementById("ayuda-cliente");
-  const azar = document.getElementById("al-azar");
-  if (!region || !cliente) return;
-  const todos = Object.values(D.regiones).flat();
-  const actuales = () => region.value ? (D.regiones[region.value] || []) : todos;
-  function llenar() {{
-    lista.replaceChildren(...actuales().map(id => {{ const o = document.createElement("option"); o.value = id; return o; }}));
-    if (cliente.value && region.value && !actuales().includes(cliente.value)) cliente.value = "";
-    mostrar();
-  }}
-  function mostrar() {{
-    if (!ayuda) return;
-    const id = cliente.value.trim().toUpperCase();
-    ayuda.textContent = D.etiqueta[id] ? id + " · " + D.etiqueta[id]
-      : (cliente.value ? "No hay un cliente con ese código." : "Escribe el código o elige uno al azar.");
-  }}
-  region.addEventListener("change", llenar);
-  llenar();
-  cliente.addEventListener("input", mostrar);
-  azar.addEventListener("click", () => {{
-    const ids = actuales();
-    if (!ids.length) return;
-    cliente.value = ids[Math.floor(Math.random() * ids.length)];
-    mostrar();
-    cliente.focus();
-  }});
-}})();
-</script>
+<script>{JS_ELEGIR}</script>
 </body></html>"""
 
 
@@ -579,6 +674,14 @@ def historial_html(usuario_id: str) -> str:
 @app.get("/health")
 def health():
     return {"status": "ok", "servicio": "front"}
+
+
+@app.get("/clientes.json")
+def clientes_json():
+    try:
+        return clientes()
+    except ErrorServicio as e:
+        return JSONResponse(status_code=503, content={"detail": str(e)})
 
 
 @app.get("/", response_class=HTMLResponse)
