@@ -131,3 +131,10 @@ def test_dashboard_muestra_la_proporcion_con_lista_de_reserva(monkeypatch):
     r = cliente.get("/dashboard")
     assert "Recomendaciones entregadas" in r.text
     assert "50%" in r.text
+
+
+def test_producto_sin_nombre_muestra_el_sku(monkeypatch):
+    con_nan = [{"sku": "NX-1", "nombre": "NaN", "categoria": "gaming"}] + productos("P", 7)
+    monkeypatch.setattr(main.httpx, "request", gateway(personales=con_nan))
+    r = predecir()
+    assert "Producto NX-1" in r.text and ">NaN<" not in r.text

@@ -85,13 +85,21 @@ def llamar(metodo: str, url: str, **kwargs):
 # Recomendaciones: entre 4 y 8 productos, con lista de reserva (mas vendidos)
 # ---------------------------------------------------------------------------
 
+def texto_valido(valor) -> str | None:
+    """Texto limpio, o None si viene vacio o como "NaN"/"None" (nulos de los CSV originales)."""
+    texto = str(valor).strip() if valor is not None else ""
+    return None if texto.lower() in ("", "nan", "none", "null") else texto
+
+
 def productos_de(datos) -> list[dict]:
     """Toma la lista "recomendaciones" del dominio y descarta lo que no tenga el formato esperado."""
     items = datos.get("recomendaciones") if isinstance(datos, dict) else None
     if not isinstance(items, list):
         return []
     return [
-        {"sku": str(i["sku"]), "nombre": str(i.get("nombre") or i["sku"]), "categoria": str(i.get("categoria") or "-")}
+        {"sku": str(i["sku"]),
+         "nombre": texto_valido(i.get("nombre")) or f"Producto {i['sku']}",
+         "categoria": (texto_valido(i.get("categoria")) or "-").capitalize()}
         for i in items if isinstance(i, dict) and i.get("sku")
     ]
 
