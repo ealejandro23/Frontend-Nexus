@@ -1,8 +1,10 @@
 """Front de Nexo (Caso 1 - Nexus Retail), hecho solo con FastAPI.
 FastAPI arma la pagina en Python y llama al dominio a traves del gateway.
 """
+import json
 import os
 import re
+import unicodedata
 import threading
 import time
 from html import escape
@@ -314,6 +316,10 @@ button { font: inherit; font-weight: 600; background: var(--marca); color: #fff;
   padding: .7rem 1rem; cursor: pointer; transition: background .15s ease-out; }
 button:hover { background: var(--marca-osc); }
 button:disabled { opacity: .6; cursor: progress; }
+.fila-campo { display: flex; gap: .5rem; }
+.fila-campo input { flex: 1; min-width: 0; }
+button.secundario { background: var(--panel); color: var(--marca-osc); border: 1px solid #cfd4cc; padding: .6rem .8rem; font-weight: 600; }
+button.secundario:hover { background: var(--marca-suave); }
 .principal { display: grid; gap: 1.25rem; min-width: 0; }
 .bloque { background: var(--panel); border: 1px solid var(--linea); border-radius: var(--radio);
   box-shadow: var(--sombra); padding: 1.25rem 1.35rem; }
@@ -384,6 +390,44 @@ def barra_superior(activa: str) -> str:
             f'<nav>{enlace("/", "Recomendador")}{enlace("/dashboard", "Dashboard")}</nav></div></header>')
 
 
+def _sin_tildes(texto: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn")
+
+
+# Los datos traen la misma region escrita de varias formas ("Bio-Bio", "Biobío", "Rm", "V Region"...):
+# se unifican con el nombre oficial de la region de Chile.
+REGIONES_OFICIALES = {
+    "biobio": "Biobío", "araucania": "La Araucanía", "laaraucania": "La Araucanía", "maule": "Maule",
+    "delmaule": "Maule", "ohiggins": "O'Higgins", "libertadorbohiggins": "O'Higgins",
+    "metropolitana": "Metropolitana", "rmetropolitana": "Metropolitana", "regionmetropolitana": "Metropolitana",
+    "rm": "Metropolitana", "vregion": "Valparaíso", "valparaiso": "Valparaíso", "tarapaca": "Tarapacá",
+    "antofagasta": "Antofagasta", "coquimbo": "Coquimbo", "loslagos": "Los Lagos",
+}
+
+
+def region_oficial(bruto: str) -> str:
+    compacto = re.sub(r"[^a-z]", "", _sin_tildes(bruto).lower())
+    return REGIONES_OFICIALES.get(compacto, bruto.strip().title())
+
+
+def agrupar_regiones(usuarios: list[dict], usuario_sel: str = "") -> tuple[list, dict, str]:
+    """Agrupa clientes por region normalizada (los datos traen "tarapaca" y "tarapacá", etc.).
+    Devuelve ([(clave, (etiqueta, [ids]))] ordenado, {id: etiqueta}, clave de la region del cliente elegido)."""
+    grupos: dict[str, list] = {}
+    for u in usuarios:
+        etiqueta = region_oficial(texto_valido(u.get("region")) or "Sin región")
+        grupos.setdefault(etiqueta, []).append(str(u["usuario_id"]))
+    regiones, region_de = [], {}
+    for etiqueta, ids in grupos.items():
+        clave = re.sub(r"[^a-z]", "", _sin_tildes(etiqueta).lower())
+        regiones.append((clave, (etiqueta, sorted(ids))))
+        for i in ids:
+            region_de[i] = etiqueta
+    regiones.sort(key=lambda r: r[1][0])
+    region_sel = next((c for c, (_, ids) in regiones if usuario_sel in ids), "")
+    return regiones, region_de, region_sel
+
+
 def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") -> str:
     avisos = []
     try:
@@ -401,24 +445,30 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     if not isinstance(categorias, list) or not categorias:
         categorias = CATEGORIAS_POR_DEFECTO
 
-    # Buscador con sugerencias: con miles de clientes, un <select> no se puede recorrer.
-    sugerencias = "".join(
-        f'<option value="{escape(str(u["usuario_id"]))}">'
-        f'{escape(str(u["usuario_id"]))}{" (" + escape(str(u["region"]).title()) + ")" if u.get("region") else ""}</option>'
-        for u in usuarios
+    # Selector de cliente en dos pasos: region (sin repetir) y luego el codigo del cliente.
+    regiones, region_de, region_sel = agrupar_regiones(usuarios, usuario_sel)
+    opciones_region = f'<option value="">Todas las regiones ({len(usuarios):,})</option>'.replace(",", ".") + "".join(
+        f'<option value="{escape(clave)}"{" selected" if clave == region_sel else ""}>'
+        f'{escape(etiqueta)} ({len(ids):,})</option>'.replace(",", ".")
+        for clave, (etiqueta, ids) in regiones
     )
+    sugerencias = ""  # el script llena la lista segun la region (asi la pagina no repite los 4.000 codigos)
+    datos_clientes = json.dumps({"regiones": {clave: ids for clave, (_, ids) in regiones},
+                                 "etiqueta": {i: etiqueta for i, etiqueta in region_de.items()}},
+                                ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     opciones_categoria = "".join(
         f'<option value="{escape(str(c))}"{" selected" if str(c) == categoria_sel else ""}>{escape(str(c).capitalize())}</option>'
         for c in categorias
     )
     avisos_html = "".join(f'<p class="error">{escape(a)}</p>' for a in avisos)
-    total = f"{len(usuarios):,}".replace(",", ".") if usuarios else ""
-    ayuda = f'<span class="ayuda">Escribe el código; hay {total} clientes.</span>' if usuarios else ""
+    seleccionado = f"{usuario_sel} · {region_de[usuario_sel]}" if usuario_sel in region_de else ""
+    ayuda = (f'<span class="ayuda" id="ayuda-cliente">{escape(seleccionado or "Escribe el código o elige uno al azar.")}</span>'
+             if usuarios else "")
     if not resultado:
         resultado = ('<section class="bloque vacio"><h2>Elige un cliente para ver su recomendación</h2>'
                      '<p>El modelo calcula la probabilidad de que compre en la categoría elegida y el sistema arma '
                      'entre 4 y 8 productos para mostrarle. En paralelo, la IA redacta el mensaje de la campaña.</p>'
-                     '<p>Prueba con U100000 o U103814.</p></section>')
+                     '<p>Filtra por región o usa <strong>Al azar</strong> para elegir un cliente.</p></section>')
 
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
@@ -433,9 +483,15 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     <p>Qué productos mostrarle a cada cliente y qué mensaje enviarle.</p>
     {avisos_html}
     <form method="post" action="/predecir" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Calculando...'">
+      <label>Región
+        <select id="region">{opciones_region}</select>
+      </label>
       <label>Cliente
-        <input name="usuario_id" list="clientes" required autocomplete="off" spellcheck="false"
-               placeholder="Por ejemplo, U103808" value="{escape(usuario_sel)}">
+        <span class="fila-campo">
+          <input name="usuario_id" id="cliente" list="clientes" required autocomplete="off" spellcheck="false"
+                 placeholder="Ej.: U100399" value="{escape(usuario_sel)}">
+          <button type="button" class="secundario" id="al-azar">Al azar</button>
+        </span>
         {ayuda}
       </label>
       <datalist id="clientes">{sugerencias}</datalist>
@@ -449,6 +505,38 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
     {resultado}
   </div>
 </main>
+<script>
+(function () {{
+  const D = {datos_clientes};
+  const region = document.getElementById("region"), cliente = document.getElementById("cliente");
+  const lista = document.getElementById("clientes"), ayuda = document.getElementById("ayuda-cliente");
+  const azar = document.getElementById("al-azar");
+  if (!region || !cliente) return;
+  const todos = Object.values(D.regiones).flat();
+  const actuales = () => region.value ? (D.regiones[region.value] || []) : todos;
+  function llenar() {{
+    lista.replaceChildren(...actuales().map(id => {{ const o = document.createElement("option"); o.value = id; return o; }}));
+    if (cliente.value && region.value && !actuales().includes(cliente.value)) cliente.value = "";
+    mostrar();
+  }}
+  function mostrar() {{
+    if (!ayuda) return;
+    const id = cliente.value.trim().toUpperCase();
+    ayuda.textContent = D.etiqueta[id] ? id + " · " + D.etiqueta[id]
+      : (cliente.value ? "No hay un cliente con ese código." : "Escribe el código o elige uno al azar.");
+  }}
+  region.addEventListener("change", llenar);
+  llenar();
+  cliente.addEventListener("input", mostrar);
+  azar.addEventListener("click", () => {{
+    const ids = actuales();
+    if (!ids.length) return;
+    cliente.value = ids[Math.floor(Math.random() * ids.length)];
+    mostrar();
+    cliente.focus();
+  }});
+}})();
+</script>
 </body></html>"""
 
 
