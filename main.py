@@ -128,6 +128,10 @@ def recomendar(usuario_id: str) -> tuple[list[dict], bool, str | None]:
         datos, _ = llamar("GET", f"{DOMINIO}/api/recomendaciones",
                           params={"usuario_id": usuario_id, "limite": MAX_PRODUCTOS})
         personales = productos_de(datos)
+        if isinstance(datos, dict) and datos.get("origen") == "regla":
+            # RN2: sin consentimiento el dominio no usa el historial; la lista son los mas vendidos.
+            productos = (personales or reserva)[:MAX_PRODUCTOS]
+            return productos, True, (str(datos.get("motivo") or "Sin personalizacion") + ": se muestran los mas vendidos.")
     except ErrorServicio as e:
         personales, motivo = [], f"El recomendador personalizado no respondio: {e}"
     if personales and reserva and [p["sku"] for p in personales] == [p["sku"] for p in reserva]:

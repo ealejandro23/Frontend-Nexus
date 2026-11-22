@@ -138,3 +138,18 @@ def test_producto_sin_nombre_muestra_el_sku(monkeypatch):
     monkeypatch.setattr(main.httpx, "request", gateway(personales=con_nan))
     r = predecir()
     assert "Producto NX-1" in r.text and ">NaN<" not in r.text
+
+
+def test_sin_consentimiento_muestra_mas_vendidos_con_el_motivo(monkeypatch):
+    base = gateway(personales=productos("P", 8))
+
+    def sin_consentimiento(metodo, url, **kwargs):
+        if url.endswith("/api/recomendaciones") and "usuario_id" in (kwargs.get("params") or {}):
+            return httpx.Response(200, json={"origen": "regla", "motivo": "El cliente no dio consentimiento para usar su historial (RN2)",
+                                             "recomendaciones": MAS_VENDIDOS}, request=httpx.Request(metodo, url))
+        return base(metodo, url, **kwargs)
+
+    monkeypatch.setattr(main.httpx, "request", sin_consentimiento)
+    r = predecir()
+    assert "no dio consentimiento" in r.text and "Lista de reserva (mas vendidos)" in r.text
+    assert main._estadisticas["con_reserva"] == 1
