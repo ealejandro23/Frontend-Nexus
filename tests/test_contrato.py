@@ -9,6 +9,8 @@ cliente = TestClient(main.app)
 
 USUARIOS = [{"usuario_id": "U103808", "region": "Coquimbo"}]
 CATEGORIAS = ["Audio", "Notebooks"]
+PERFIL = {"usuario_id": "U103808", "region": "coquimbo", "comuna": "La Serena", "edad": 34,
+          "acepta_marketing": True, "pedidos": 3, "total_gastado": 59970.0}
 HISTORIAL = [{"producto": "Audífonos", "categoria": "Audio", "monto": 19990}]
 PREDICCION = {"prediccion_id": 42, "probabilidad_compra": 0.73, "prediccion": 1,
               "version_modelo": "v1", "instancia": "dominio1"}
@@ -18,6 +20,8 @@ def gateway_falso(prediccion_status=200, prediccion_json=PREDICCION):
     """Devuelve una función que reemplaza a httpx.request y responde según la ruta pedida."""
     def responder(metodo, url, **kwargs):
         peticion = httpx.Request(metodo, url)
+        if "/usuarios/" in url and not url.endswith("/historial"):
+            return httpx.Response(200, json=PERFIL, request=peticion)
         if url.endswith("/usuarios"):
             return httpx.Response(200, json=USUARIOS, request=peticion)
         if url.endswith("/categorias"):
@@ -84,3 +88,20 @@ def test_clave_rechazada_muestra_aviso_claro(monkeypatch):
     r = cliente.get("/")
     assert r.status_code == 200
     assert "X-API-Key" in r.text
+
+
+def test_cliente_inexistente_muestra_aviso_claro(monkeypatch):
+    def responder(metodo, url, **kwargs):
+        peticion = httpx.Request(metodo, url)
+        if "/usuarios/" in url and not url.endswith("/historial"):
+            return httpx.Response(404, json={"detail": "Cliente no encontrado"}, request=peticion)
+        return gateway_falso()(metodo, url, **kwargs)
+    monkeypatch.setattr(main.httpx, "request", responder)
+    r = predecir()
+    assert "No existe un cliente con el código U103808" in r.text
+
+
+def test_ficha_del_cliente_con_datos_reales(monkeypatch):
+    monkeypatch.setattr(main.httpx, "request", gateway_falso())
+    r = predecir()
+    assert "La Serena, Coquimbo" in r.text and "$ 59.970" in r.text and "34 años" in r.text

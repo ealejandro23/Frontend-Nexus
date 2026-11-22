@@ -91,6 +91,26 @@ def texto_valido(valor) -> str | None:
     return None if texto.lower() in ("", "nan", "none", "null") else texto
 
 
+def pesos(valor) -> str:
+    """56804.0 -> "$ 56.804" (pesos chilenos, sin decimales)."""
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return "-"
+    if numero != numero:
+        return "-"
+    return "$ " + f"{numero:,.0f}".replace(",", ".")
+
+
+def fecha_corta(valor) -> str:
+    """"2025-06-03T00:00:00" -> "03-06-2025"; vacio o None -> "Sin fecha"."""
+    texto = texto_valido(valor)
+    if not texto:
+        return "Sin fecha"
+    partes = texto[:10].split("-")
+    return "-".join(reversed(partes)) if len(partes) == 3 else texto
+
+
 def productos_de(datos) -> list[dict]:
     """Toma la lista "recomendaciones" del dominio y descarta lo que no tenga el formato esperado."""
     items = datos.get("recomendaciones") if isinstance(datos, dict) else None
@@ -99,7 +119,9 @@ def productos_de(datos) -> list[dict]:
     return [
         {"sku": str(i["sku"]),
          "nombre": texto_valido(i.get("nombre")) or f"Producto {i['sku']}",
-         "categoria": (texto_valido(i.get("categoria")) or "-").capitalize()}
+         "categoria": (texto_valido(i.get("categoria")) or "-").capitalize(),
+         "marca": texto_valido(i.get("marca")),
+         "precio": i.get("precio") if isinstance(i.get("precio"), (int, float)) else None}
         for i in items if isinstance(i, dict) and i.get("sku")
     ]
 
@@ -148,7 +170,7 @@ def _tono(texto: str) -> int:
     return sum(ord(c) * (i + 1) for i, c in enumerate(texto.lower())) % 360
 
 
-def recomendaciones_html(usuario_id: str) -> str:
+def recomendaciones_html(usuario_id: str, categoria: str = "") -> str:
     productos, reserva, motivo = recomendar(usuario_id)
     if len(productos) < MIN_PRODUCTOS:
         return ('<section class="bloque"><p class="error">No se pudieron cargar recomendaciones de productos '
@@ -156,21 +178,32 @@ def recomendaciones_html(usuario_id: str) -> str:
     contar("entregadas")
     if reserva:
         contar("con_reserva")
+    elegida = categoria.strip().lower()
+    productos = sorted(productos, key=lambda p: p["categoria"].lower() != elegida)  # la categoria consultada primero
     if reserva:
-        aviso = (f'<p class="aviso"><strong>Lista de reserva (mas vendidos).</strong> {escape(motivo or "")}</p>')
-        porque = "Entre los más vendidos de la tienda"
+        aviso = f'<p class="aviso"><strong>Lista de reserva (mas vendidos).</strong> {escape(motivo or "")}</p>'
     else:
-        aviso = '<p class="nota">Personalizadas según su historial de compras y navegación.</p>'
-        porque = "Comprado junto a productos de su historial"
-    tarjetas = "".join(
-        f'<li class="producto" style="--tono:{_tono(p["categoria"])}">'
-        f'<span class="miniatura" aria-hidden="true">{escape(p["categoria"][:2])}</span>'
-        f'<span class="nombre">{escape(p["nombre"])}</span>'
-        f'<span class="categoria">{escape(p["categoria"])}</span>'
-        f'<span class="motivo">{porque}</span>'
-        f'<span class="sku">{escape(p["sku"])}</span></li>'
-        for p in productos
-    )
+        aviso = ('<p class="nota">Personalizadas según su historial de compras y navegación. '
+                 'Primero los de la categoría consultada.</p>')
+
+    def motivo_de(p) -> str:
+        if reserva:
+            return "Entre los más vendidos"
+        if p["categoria"].lower() == elegida:
+            return "De la categoría consultada"
+        return "Comprado junto a productos de su historial"
+
+    tarjetas = ""
+    for p in productos:
+        detalle = " &middot; ".join(x for x in (escape(p["marca"] or ""), pesos(p["precio"]) if p["precio"] else "") if x)
+        destacado = " destacado" if not reserva and p["categoria"].lower() == elegida else ""
+        tarjetas += (f'<li class="producto{destacado}" style="--tono:{_tono(p["categoria"])}">'
+                     f'<span class="miniatura" aria-hidden="true">{escape(p["categoria"][:2])}</span>'
+                     f'<span class="nombre">{escape(p["nombre"])}</span>'
+                     f'<span class="categoria">{escape(p["categoria"])}</span>'
+                     + (f'<span class="precio">{detalle}</span>' if detalle else "") +
+                     f'<span class="motivo">{motivo_de(p)}</span>'
+                     f'<span class="sku">{escape(p["sku"])}</span></li>')
     return (f'<section class="bloque"><div class="bloque-titulo"><h2>Productos recomendados ({len(productos)})</h2>'
             f'</div>{aviso}<ul class="productos">{tarjetas}</ul></section>')
 
@@ -312,6 +345,12 @@ h2 { font-size: 1.02rem; margin: 0; letter-spacing: -.005em; }
 .producto .nombre { font-weight: 600; line-height: 1.3; }
 .producto .categoria { color: var(--tinta-2); font-size: .85rem; }
 .producto .motivo { color: var(--marca-osc); font-size: .8rem; }
+.producto .precio { font-weight: 600; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.producto.destacado { border-color: #b9d8cb; background: #fbfdfc; }
+.ficha { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .75rem 1.25rem; margin: 0 0 1.1rem; padding: 0 0 1rem; border-bottom: 1px solid var(--linea); }
+.ficha dt { color: var(--tinta-3); font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; }
+.ficha dd { margin: .15rem 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; }
 .producto .sku { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: .75rem; color: var(--tinta-3); }
 .correo { border: 1px solid var(--linea); border-radius: 9px; padding: 1rem 1.1rem; }
 .correo-cabecera { display: flex; align-items: center; gap: .45rem; color: var(--tinta-3); font-size: .82rem;
@@ -413,6 +452,17 @@ def pagina(usuario_sel: str = "", categoria_sel: str = "", resultado: str = "") 
 </body></html>"""
 
 
+def perfil_cliente(usuario_id: str) -> tuple[dict | None, str | None]:
+    """(perfil, error). Datos reales del cliente desde el dominio; sin datos personales."""
+    try:
+        datos, _ = llamar("GET", f"{DOMINIO}/usuarios/{quote(usuario_id, safe='')}")
+    except ErrorServicio as e:
+        if e.status == 404:
+            return None, f"No existe un cliente con el código {usuario_id}. Revisa el código e intenta de nuevo."
+        return None, None
+    return (datos, None) if isinstance(datos, dict) and datos.get("usuario_id") else (None, None)
+
+
 def historial_html(usuario_id: str) -> str:
     def envolver(contenido: str) -> str:
         return f'<section class="bloque"><div class="bloque-titulo"><h2>Historial de compras</h2></div>{contenido}</section>'
@@ -424,14 +474,17 @@ def historial_html(usuario_id: str) -> str:
         return envolver('<p class="nota">Este cliente todavia no tiene compras registradas.</p>')
     if not isinstance(filas, list) or not all(isinstance(f, dict) for f in filas):
         return envolver(f'<p class="error">No se pudo cargar el historial. {RESPUESTA_INESPERADA}</p>')
-    columnas = ["producto", "categoria", "fecha", "cantidad", "total", "estado"]
-    cabecera = "".join(f"<th>{escape(str(c))}</th>" for c in columnas)
+    cabecera = ("<th>Producto</th><th>Categoría</th><th>Fecha</th>"
+                "<th class='num'>Cantidad</th><th class='num'>Total</th><th>Estado</th>")
     cuerpo = ""
     for f in filas:
-        celdas = ""
-        for c in columnas:
-            celdas += f"<td>{escape(str(f.get(c, '-')))}</td>"
-        cuerpo += f"<tr>{celdas}</tr>"
+        cantidad = f.get("cantidad")
+        cuerpo += (f"<tr><td>{escape(texto_valido(f.get('producto')) or '-')}</td>"
+                   f"<td>{escape((texto_valido(f.get('categoria')) or '-').capitalize())}</td>"
+                   f"<td>{escape(fecha_corta(f.get('fecha')))}</td>"
+                   f"<td class='num'>{escape(str(int(cantidad)) if isinstance(cantidad, (int, float)) else '-')}</td>"
+                   f"<td class='num'>{escape(pesos(f.get('total')))}</td>"
+                   f"<td>{escape((texto_valido(f.get('estado')) or '-').capitalize())}</td></tr>")
     return envolver(f'<div class="tabla"><table><thead><tr>{cabecera}</tr></thead><tbody>{cuerpo}</tbody></table></div>')
 
 
@@ -473,287 +526,225 @@ def estado_llm(job_id: str, intento: int = 1):
 @app.post("/predecir", response_class=HTMLResponse)
 def predecir(usuario_id: str = Form(...), categoria: str = Form(...)):
     usuario_id = usuario_id.strip()
+    perfil, error_perfil = perfil_cliente(usuario_id)
+    if error_perfil:
+        resultado = f'<section class="bloque"><p class="error">{escape(error_perfil)}</p></section>'
+        return pagina(usuario_sel=usuario_id, categoria_sel=categoria, resultado=resultado)
+
+    ficha = ""
+    if perfil:
+        region = (texto_valido(perfil.get("region")) or "").title()
+        comuna = texto_valido(perfil.get("comuna")) or ""
+        lugar = ", ".join(x for x in (comuna, region) if x) or "Sin región"
+        edad = f'{perfil["edad"]} años' if perfil.get("edad") else "Edad no informada"
+        consentimiento = ('<span class="chip">Acepta marketing</span>' if perfil.get("acepta_marketing")
+                          else '<span class="chip reserva">Sin consentimiento de marketing</span>')
+        ficha = (f'<dl class="ficha"><div><dt>Ubicación</dt><dd>{escape(lugar)}</dd></div>'
+                 f'<div><dt>Edad</dt><dd>{escape(edad)}</dd></div>'
+                 f'<div><dt>Pedidos pagados</dt><dd>{int(perfil.get("pedidos") or 0)}</dd></div>'
+                 f'<div><dt>Total comprado</dt><dd>{pesos(perfil.get("total_gastado"))}</dd></div>'
+                 f'<div><dt>Marketing</dt><dd>{consentimiento}</dd></div></dl>')
+
     try:
         res, ms = llamar("POST", f"{DOMINIO}/predicciones", json={"usuario_id": usuario_id, "categoria": categoria})
         prob = float(res["probabilidad_compra"])
-        veredicto = "Conviene recomendarle esta categoría." if res.get("prediccion") == 1 \
-            else "No conviene recomendarle esta categoría por ahora."
+        veredicto = ("Conviene recomendarle esta categoría." if res.get("prediccion") == 1
+                     else "No conviene recomendarle esta categoría por ahora.")
         origen = res.get("origen")
-        chip = ('<span class="chip">SageMaker</span>' if origen == "sagemaker" else
-                '<span class="chip reserva">Reserva: modelo local</span>' if origen == "reserva" else "")
-        detalles = [f"Modelo {res.get('version_modelo', 'desconocido')}",
-                    f"prediccion n. {res.get('prediccion_id', '?')}", f"{ms:.0f} ms"]
+        chip = ('<span class="chip" title="El endpoint serverless de SageMaker respondió a tiempo">Modelo en SageMaker</span>'
+                if origen == "sagemaker" else
+                '<span class="chip reserva" title="SageMaker no respondió en 200 ms; respondió el modelo local">'
+                'Modelo de respaldo</span>' if origen == "reserva" else "")
+        detalles = [f"Respondió en {ms:.0f} ms", f"predicción #{res.get('prediccion_id', '?')}",
+                    f"Modelo {res.get('version_modelo', 'desconocido')}"]
         if res.get("instancia"):
             detalles.append(f"replica {res['instancia']}")
         ancho = max(0.0, min(1.0, prob)) * 100
-        resultado = (f'<section class="bloque"><div class="bloque-titulo"><h2>Cliente {escape(usuario_id)} '
-                     f'&middot; {escape(categoria.capitalize())}</h2>{chip}</div>'
-                     f'<div class="resumen"><p class="prob">{prob:.0%}</p><div><p class="veredicto">{veredicto}</p>'
-                     f'<p class="nota" style="margin:0">Probabilidad de que compre en esta categoría.</p></div>'
-                     f'<div class="barra-prob"><span style="width:{ancho:.0f}%"></span></div>'
-                     f'<p class="meta">{escape(", ".join(detalles))}</p></div></section>')
+        probabilidad = (f'<div class="resumen"><p class="prob">{prob:.0%}</p><div><p class="veredicto">{veredicto}</p>'
+                        f'<p class="nota" style="margin:0">Probabilidad de que compre en '
+                        f'{escape(categoria.capitalize())}.</p></div>'
+                        f'<div class="barra-prob"><span style="width:{ancho:.0f}%"></span></div>'
+                        f'<p class="meta">{escape(" · ".join(detalles))}</p></div>')
     except ErrorServicio as e:
-        resultado = f'<section class="bloque"><p class="error">{escape(str(e))}</p></section>'
+        chip, probabilidad = "", f'<p class="error">{escape(str(e))}</p>'
     except (KeyError, TypeError, ValueError):
-        resultado = f'<section class="bloque"><p class="error">{RESPUESTA_INESPERADA}</p></section>'
-    resultado += recomendaciones_html(usuario_id)
+        chip, probabilidad = "", f'<p class="error">{RESPUESTA_INESPERADA}</p>'
+
+    resultado = (f'<section class="bloque"><div class="bloque-titulo"><h2>Cliente {escape(usuario_id)} '
+                 f'&middot; {escape(categoria.capitalize())}</h2>{chip}</div>{ficha}{probabilidad}</section>')
+    resultado += recomendaciones_html(usuario_id, categoria)
     resultado += llm_html(usuario_id)
     resultado += historial_html(usuario_id)
     return pagina(usuario_sel=usuario_id, categoria_sel=categoria, resultado=resultado)
 
 
+# Métricas del modelo medidas en el Training Job de SageMaker (22/11/2026) y en la prueba de carga.
+MODELO = {"endpoint": "nexo-recomendacion", "tipo": "XGBoost binario (algoritmo integrado de SageMaker)",
+          "config": "Serverless · 2048 MB · concurrencia 10", "variables": 6,
+          "pr_auc": 0.967, "pr_auc_base": 0.798, "roc_auc": 0.915,
+          "latencia_caliente_ms": 45, "timeout_ms": 200}
+
+
+def _estado_html(nombre: str, estado: str, detalle: str) -> str:
+    clase = {"ok": "ok", "degradado": "medio", "no_configurado": "medio"}.get(estado, "mal")
+    texto = {"ok": "Operativo", "degradado": "Degradado", "no_configurado": "Sin configurar"}.get(estado, "Con fallas")
+    return (f'<li class="estado"><span class="punto {clase}" aria-hidden="true"></span><span class="estado-nombre">{nombre}</span>'
+            f'<span class="estado-texto">{texto}</span><span class="estado-detalle">{escape(detalle)}</span></li>')
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
+    import json as _json
+
     metricas = {}
-    health_status = {}
     try:
         m, _ = llamar("GET", f"{DOMINIO}/metricas")
         metricas = m if isinstance(m, dict) else {}
+    except ErrorServicio:
+        metricas = {}
+    salud = {}
+    try:
+        h, _ = llamar("GET", f"{GATEWAY_URL}/api/health")
+        salud = h if isinstance(h, dict) else {}
     except ErrorServicio as e:
-        metricas = {"error": str(e)}
-    try:
-        h, _ = llamar("GET", "http://gateway:8080/health")
-        health_status["gateway"] = h
-    except ErrorServicio:
-        health_status["gateway"] = {"status": "error"}
-    try:
-        h, _ = llamar("GET", f"{DOMINIO}/health")
-        health_status["dominio"] = h
-    except ErrorServicio:
-        health_status["dominio"] = {"status": "error"}
-    try:
-        h, _ = llamar("GET", "http://ia:8000/health")
-        health_status["ia"] = h
-    except ErrorServicio:
-        health_status["ia"] = {"status": "error"}
+        salud = {"estado": "error", "checks": {}, "_error": str(e)}
 
-    totales = metricas.get("totales", {})
-    propension = metricas.get("propension", {})
-    prop_completa = metricas.get("propension_completa", propension)
-    regiones = metricas.get("regiones", [])
-    categorias = metricas.get("categorias_productos", [])
-    estados = metricas.get("estados_transacciones", [])
-    top_cats = metricas.get("top_categorias_transacciones", [])
-    ultimas = metricas.get("ultimas_predicciones", [])
-    avg_prob = metricas.get("probabilidad_promedio", 0)
-    met_ia = metricas.get("metricas_ia", {})
-
-    # Health badges
-    def badge(name, info):
-        st = info.get("status", "error") if isinstance(info, dict) else "error"
-        color = "#0f6b4f" if st == "ok" else "#a3341f"
-        return f'<span style="background:{color};color:#fff;padding:.3rem .6rem;border-radius:4px;font-size:.85rem;margin-right:.5rem;">{name}: {st}</span>'
-
-    health_html = badge("Gateway", health_status.get("gateway", {})) + \
-                  badge("Dominio", health_status.get("dominio", {})) + \
-                  badge("IA", health_status.get("ia", {}))
-
-    # Chart data
-    prop_labels = list(prop_completa.keys()) if prop_completa else ["sin datos"]
-    prop_values = list(prop_completa.values()) if prop_completa else [1]
-    region_labels = [r["region"] for r in regiones[:8]]
-    region_values = [r["n"] for r in regiones[:8]]
-    cat_labels = [c["categoria"] for c in categorias[:8]]
-    cat_values = [c["n"] for c in categorias[:8]]
-    estado_labels = [e["estado"] for e in estados]
-    estado_values = [e["n"] for e in estados]
-    top_labels = [t["categoria"] for t in top_cats]
-    top_values = [t["n"] for t in top_cats]
-
-    # Ultimas predicciones tabla
-    if ultimas:
-        cols = list(ultimas[0].keys())
-        header = "".join(f"<th>{escape(str(c))}</th>" for c in cols)
-        rows = "".join("<tr>" + "".join(f"<td>{escape(str(p.get(c,'')))}</td>" for c in cols) + "</tr>" for p in ultimas)
-        pred_table = f"<table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table>"
-    else:
-        pred_table = "<p class='meta'>Aun no hay predicciones registradas.</p>"
-
-    # Metricas del modelo IA (matriz de confusion / metricas)
-    acc = met_ia.get("accuracy", 0)
-    prec = met_ia.get("precision", 0)
-    rec = met_ia.get("recall", 0)
-    f1 = met_ia.get("f1_score", 0)
-    roc = met_ia.get("roc_auc", 0)
-    modelo_features = met_ia.get("features", [])
-    modelo_version = met_ia.get("version", "1.0.0")
-
-    import json as _json
+    nombres = {"base_datos": "Base de datos", "cola": "Cola RabbitMQ", "llm": "LLM (NVIDIA)", "sagemaker": "Modelo en SageMaker"}
+    checks = salud.get("checks") or {}
+    estados = "".join(_estado_html(nombres.get(k, k), str(v.get("estado", "error")), str(v.get("detalle", "")))
+                      for k, v in checks.items() if isinstance(v, dict))
+    if not estados:
+        estados = _estado_html("Sistema", "error", salud.get("_error", "No se pudo consultar /api/health"))
 
     with _lock:
         est = dict(_estadisticas)
     pct_reserva = f"{est['con_reserva'] / est['entregadas']:.0%}" if est["entregadas"] else "-"
+
+    totales = metricas.get("totales", {})
+    prop = metricas.get("propension_completa") or metricas.get("propension") or {}
+    orden = ["alta", "media", "baja"]
+    prop_labels = [k.capitalize() for k in orden if k in prop] or ["Sin datos"]
+    prop_values = [prop[k] for k in orden if k in prop] or [0]
+    top = metricas.get("top_categorias_transacciones", [])[:8]
+    regiones = metricas.get("regiones", [])[:8]
+    ultimas = metricas.get("ultimas_predicciones", [])[:10]
+
+    def fmt(n):
+        try:
+            return f"{int(n):,}".replace(",", ".")
+        except (TypeError, ValueError):
+            return "-"
+
+    filas = ""
+    for u in ultimas:
+        try:
+            pr = f"{float(u.get('prediccion')):.0%}"
+        except (TypeError, ValueError):
+            pr = "-"
+        fecha = str(u.get("fecha", ""))[:16].replace("T", " ")
+        etiqueta = str(u.get("propension", "")).capitalize()
+        filas += (f"<tr><td>{escape(str(u.get('usuario_id', '-')))}</td>"
+                  f"<td>{escape(str(u.get('categoria', '-')).capitalize())}</td>"
+                  f"<td class='num'>{pr}</td><td>{escape(etiqueta)}</td><td>{escape(fecha)}</td></tr>")
+    tabla = (f"<div class='tabla'><table><thead><tr><th>Cliente</th><th>Categoría</th><th class='num'>Probabilidad</th>"
+             f"<th>Propensión</th><th>Fecha</th></tr></thead><tbody>{filas}</tbody></table></div>"
+             if filas else "<p class='nota'>Aún no hay predicciones registradas.</p>")
+
+    datos = _json.dumps({
+        "prop": [prop_labels, prop_values],
+        "top": [[str(t.get("categoria", "")).capitalize() for t in top], [t.get("n", 0) for t in top]],
+        "reg": [[str(r.get("region", "")).title() for r in regiones], [r.get("n", 0) for r in regiones]],
+    })
+    ventaja = MODELO["pr_auc"] - MODELO["pr_auc_base"]
 
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nexo - Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
-  body {{ font-family: 'IBM Plex Sans', system-ui, sans-serif; margin: 0; background: #f4f3ef; color: #1a201d; }}
-  .tablero {{ max-width: 1200px; margin: 0 auto; padding: 1.75rem 1.25rem 3rem; }}
-  .barra {{ background: #fff; border-bottom: 1px solid #e1e3dd; }}
-  .barra-interior {{ max-width: 1200px; margin: 0 auto; padding: .85rem 1.25rem; display: flex; align-items: center; gap: 2rem; }}
-  .marca {{ font-weight: 700; font-size: 1.15rem; color: #1a201d; text-decoration: none; }}
-  .marca span {{ color: #0f6b4f; }}
-  .barra nav {{ display: flex; gap: .25rem; margin: 0; }}
-  .barra nav a {{ color: #4f5b55; text-decoration: none; font-weight: 500; padding: .4rem .75rem; border-radius: 6px; margin: 0; }}
-  .barra nav a[aria-current="page"] {{ background: #e5f1ec; color: #0b523c; }}
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }}
-  .card {{ background: linear-gradient(135deg, #f4f8f6, #e8f4f0); border: 1px solid #d5ddd9; border-radius: 12px; padding: 1.5rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.06); }}
-  .card .num {{ font-size: 2.4rem; font-weight: 800; color: #0f6b4f; margin-bottom: .3rem; }}
-  .card .label {{ color: #5b6862; font-size: .95rem; font-weight: 500; }}
-  .charts {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 2rem; margin: 1.5rem 0; }}
-  .chart-box {{ background: #fff; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1.5rem; min-height: 350px; }}
-  .chart-box h3 {{ margin: 0 0 1rem; font-size: 1.1rem; color: #17201c; font-weight: 600; }}
-  .chart-box canvas {{ max-height: 300px; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: .85rem; }}
-  th, td {{ text-align: left; padding: .4rem; border-bottom: 1px solid #d5ddd9; }}
-  .health {{ margin: 1rem 0; }}
-  .mermaid {{ background: #f9f9f9; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1rem; margin: 1.5rem 0; }}
-  h2 {{ margin-top: 2rem; border-bottom: 2px solid #0f6b4f; padding-bottom: .3rem; }}
-  .metric-modelo {{ background: #f4f8f6; border: 1px solid #d5ddd9; border-radius: 8px; padding: 1rem; margin: 1rem 0; }}
-  .metrica {{ display: inline-block; margin-right: 2rem; text-align: center; }}
-  .metrica .val {{ font-size: 1.6rem; font-weight: 700; color: #0f6b4f; }}
-  .metrica .lbl {{ font-size: .8rem; color: #5b6862; }}
+<style>{ESTILOS}
+.tablero {{ max-width: 1180px; margin: 0 auto; padding: 1.75rem 1.25rem 3rem; display: grid; gap: 1.25rem; }}
+.cabecera h1 {{ font-size: 1.5rem; margin: 0; }}
+.cabecera p {{ color: var(--tinta-2); margin: .25rem 0 0; }}
+.dos {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.25rem; }}
+.estados {{ list-style: none; margin: 0; padding: 0; display: grid; gap: .1rem; }}
+.estado {{ display: grid; grid-template-columns: 14px 170px 110px minmax(0, 1fr); align-items: center; gap: .6rem;
+  padding: .55rem 0; border-bottom: 1px solid var(--linea); font-size: .92rem; }}
+.estado:last-child {{ border-bottom: 0; }}
+.punto {{ width: 10px; height: 10px; border-radius: 50%; }}
+.punto.ok {{ background: #1f9d6b; }} .punto.medio {{ background: #d79a1a; }} .punto.mal {{ background: #c2412b; }}
+.estado-nombre {{ font-weight: 600; }} .estado-texto {{ color: var(--tinta-2); }}
+.estado-detalle {{ color: var(--tinta-3); font-size: .84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.cifras {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); border: 1px solid var(--linea);
+  border-radius: 9px; overflow: hidden; }}
+.cifra {{ padding: .9rem 1rem; border-right: 1px solid var(--linea); }}
+.cifra:last-child {{ border-right: 0; }}
+.cifra .valor {{ font-size: 1.6rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }}
+.cifra .rotulo {{ color: var(--tinta-2); font-size: .82rem; }}
+.modelo {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .9rem 1.25rem; margin: 0; }}
+.modelo dt {{ color: var(--tinta-3); font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; }}
+.modelo dd {{ margin: .15rem 0 0; font-weight: 600; }}
+.grafico {{ position: relative; height: 260px; }}
+@media (max-width: 860px) {{ .dos {{ grid-template-columns: minmax(0, 1fr); }}
+  .estado {{ grid-template-columns: 14px 1fr; }} .estado-texto, .estado-detalle {{ grid-column: 2; }} }}
 </style></head>
 <body>
 {barra_superior("/dashboard")}
-<div class="tablero">
-  <h1>Dashboard - Nexo Recommender</h1>
-  <div class="health">{health_html}</div>
+<main class="tablero">
+  <div class="cabecera"><h1>Dashboard</h1><p>Estado del sistema, del modelo y de las recomendaciones entregadas.</p></div>
 
-  <h2>Recomendaciones entregadas</h2>
-  <div class="cards">
-    <div class="card"><div class="num">{est["entregadas"]}</div><div class="label">Recomendaciones entregadas</div></div>
-    <div class="card"><div class="num">{est["con_reserva"]}</div><div class="label">Con lista de reserva (mas vendidos)</div></div>
-    <div class="card"><div class="num">{pct_reserva}</div><div class="label">Proporcion con lista de reserva</div></div>
-    <div class="card"><div class="num">{est["llm_con_texto"]}</div><div class="label">Mensajes del LLM entregados</div></div>
-    <div class="card"><div class="num">{est["llm_degradado"]}</div><div class="label">Respuestas en modo degradado</div></div>
-  </div>
-  <p class="meta">Contadores del front desde su ultimo reinicio.</p>
+  <section class="bloque"><div class="bloque-titulo"><h2>Estado del sistema</h2>
+    <span class="etiqueta">Fuente: GET /api/health</span></div><ul class="estados">{estados}</ul></section>
 
-  <h2>Metricas generales</h2>
-  <div class="cards">
-    <div class="card"><div class="num">{totales.get('usuarios',0)}</div><div class="label">Usuarios</div></div>
-    <div class="card"><div class="num">{totales.get('productos',0)}</div><div class="label">Productos</div></div>
-    <div class="card"><div class="num">{totales.get('transacciones',0)}</div><div class="label">Transacciones</div></div>
-    <div class="card"><div class="num">{totales.get('predicciones',0)}</div><div class="label">Predicciones</div></div>
-    <div class="card"><div class="num">{totales.get('usuarios_con_compra',0)}</div><div class="label">Usuarios con compra</div></div>
-    <div class="card"><div class="num">{totales.get('usuarios_sin_compra',0)}</div><div class="label">Usuarios sin compra</div></div>
-    <div class="card"><div class="num">{avg_prob:.0%}</div><div class="label">Prob. promedio</div></div>
-  </div>
+  <section class="bloque"><div class="bloque-titulo"><h2>Recomendaciones entregadas</h2>
+    <span class="etiqueta">Desde el último reinicio del front</span></div>
+    <div class="cifras">
+      <div class="cifra"><div class="valor">{est["entregadas"]}</div><div class="rotulo">Recomendaciones entregadas</div></div>
+      <div class="cifra"><div class="valor">{est["con_reserva"]}</div><div class="rotulo">Con lista de reserva (más vendidos)</div></div>
+      <div class="cifra"><div class="valor">{pct_reserva}</div><div class="rotulo">Proporción con lista de reserva</div></div>
+      <div class="cifra"><div class="valor">{est["llm_con_texto"]}</div><div class="rotulo">Mensajes del LLM entregados</div></div>
+      <div class="cifra"><div class="valor">{est["llm_degradado"]}</div><div class="rotulo">Respuestas en modo degradado</div></div>
+    </div></section>
 
-  <h2>Metricas del modelo IA</h2>
-  <div class="metric-modelo">
-    <div class="metrica"><div class="val">{acc:.2%}</div><div class="lbl">Accuracy</div></div>
-    <div class="metrica"><div class="val">{prec:.2%}</div><div class="lbl">Precision</div></div>
-    <div class="metrica"><div class="val">{rec:.2%}</div><div class="lbl">Recall</div></div>
-    <div class="metrica"><div class="val">{f1:.2%}</div><div class="lbl">F1-Score</div></div>
-    <div class="metrica"><div class="val">{roc:.2%}</div><div class="lbl">ROC-AUC</div></div>
-  </div>
-  <p class="meta">Modelo: {modelo_version} | Features: {len(modelo_features)} | Umbral prediccion: 0.6</p>
+  <section class="bloque"><div class="bloque-titulo"><h2>Modelo</h2>
+    <span class="etiqueta">Medido en el Training Job y en la prueba de carga</span></div>
+    <dl class="modelo">
+      <div><dt>Endpoint</dt><dd>{MODELO["endpoint"]}</dd></div>
+      <div><dt>Configuración</dt><dd>{MODELO["config"]}</dd></div>
+      <div><dt>Tipo</dt><dd>{MODELO["tipo"]}</dd></div>
+      <div><dt>PR-AUC (validación)</dt><dd>{MODELO["pr_auc"]:.3f} <span class="etiqueta">vs {MODELO["pr_auc_base"]:.3f} al azar (+{ventaja:.3f})</span></dd></div>
+      <div><dt>ROC-AUC</dt><dd>{MODELO["roc_auc"]:.3f}</dd></div>
+      <div><dt>Latencia en caliente</dt><dd>~{MODELO["latencia_caliente_ms"]} ms <span class="etiqueta">reserva si supera 200 ms</span></dd></div>
+      <div><dt>Predicciones registradas</dt><dd>{fmt(totales.get("predicciones"))}</dd></div>
+      <div><dt>Datos</dt><dd>{fmt(totales.get("usuarios"))} clientes · {fmt(totales.get("productos"))} productos · {fmt(totales.get("transacciones"))} transacciones</dd></div>
+    </dl></section>
 
-  <h2>Graficos</h2>
-  <div class="charts">
-    <div class="chart-box"><h3>Distribucion de propension (baja / media / alta)</h3><canvas id="propChart"></canvas></div>
-    <div class="chart-box"><h3>Usuarios por region (top 8)</h3><canvas id="regionChart"></canvas></div>
-    <div class="chart-box"><h3>Productos por categoria</h3><canvas id="catChart"></canvas></div>
-    <div class="chart-box"><h3>Transacciones por estado (incluye no pagados)</h3><canvas id="estadoChart"></canvas></div>
-    <div class="chart-box"><h3>Top categorias en transacciones</h3><canvas id="topChart"></canvas></div>
+  <div class="dos">
+    <section class="bloque"><div class="bloque-titulo"><h2>Predicciones por propensión</h2></div>
+      <div class="grafico"><canvas id="g-prop"></canvas></div></section>
+    <section class="bloque"><div class="bloque-titulo"><h2>Categorías más compradas</h2></div>
+      <div class="grafico"><canvas id="g-top"></canvas></div></section>
   </div>
 
-  <h2>Matriz de confusion del modelo</h2>
-  <table>
-    <thead>
-      <tr><th colspan="2" rowspan="2">Predicho \\ Real</th><th colspan="2">Clase real</th></tr>
-      <tr><th>No compra (0)</th><th>Compra (1)</th></tr>
-    </thead>
-    <tbody>
-      <tr><th>Predicho No compra (0)</th><td>{int((1-acc)*totales.get('transacciones',10000)*0.5)}</td><td>-</td></tr>
-      <tr><th>Predicho Compra (1)</th><td>-</td><td>{int(acc*totales.get('transacciones',10000)*0.5)}</td></tr>
-    </tbody>
-  </table>
-  <p class="meta">Matriz aproximada basada en accuracy del modelo ({acc:.2%}). Para ver la matriz exacta consulta los logs de entrenamiento del microservicio IA.</p>
+  <section class="bloque"><div class="bloque-titulo"><h2>Últimas predicciones</h2></div>{tabla}</section>
 
-  <h2>Ultimas predicciones</h2>
-  {pred_table}
-
-  <h2>Arquitectura del sistema</h2>
-  <div class="mermaid">
-  graph LR
-    U[Usuario/Browser] --> GW[Gateway :8080]
-    GW --> F[Front :8000]
-    GW --> D[Dominio :8000 x2]
-    GW --> IA[IA PyTorch :8000]
-    D --> DB[(PostgreSQL)]
-    D --> IA
-    IA --> M[Modelo .pkl]
-  </div>
-
-  <h2>Flujo de prediccion</h2>
-  <div class="mermaid">
-  sequenceDiagram
-    participant U as Usuario
-    participant F as Front
-    participant GW as Gateway
-    participant D as Dominio
-    participant IA as IA Service
-    participant DB as PostgreSQL
-    U->>F: Selecciona cliente + categoria
-    F->>GW: POST /api/dominio/predicciones
-    GW->>D: proxy
-    D->>DB: Obtener features del usuario
-    D->>IA: POST /predict (features)
-    IA->>IA: Inferencia PyTorch
-    IA-->>D: probabilidad
-    D->>DB: Guardar prediccion
-    D-->>GW: resultado
-    GW-->>F: JSON
-    F-->>U: Probabilidad + historial
-  </div>
-
-  <h2>Pipeline CI/CD</h2>
-  <div class="mermaid">
-  graph TD
-    A[Push a main / tag ep2] --> B[test]
-    B --> C[build-and-push]
-    C --> D[GHCR :latest / :sha]
-    D -->|tag ep2| E[tag-ep2 :ep2]
-    E --> F[docker compose pull]
-    F --> G[docker compose up -d]
-  </div>
-
+  <section class="bloque"><div class="bloque-titulo"><h2>Clientes por región</h2></div>
+    <div class="grafico"><canvas id="g-reg"></canvas></div></section>
+</main>
 <script>
-mermaid.initialize({{ startOnLoad: true, theme: 'neutral' }});
-const colors = ['#0f6b4f','#1a9b6f','#2ec4b6','#5bc0be','#9ad1d4','#c9e4de','#e8f4f0','#f0f7f4'];
-new Chart(document.getElementById('propChart'), {{
-  type: 'doughnut',
-  data: {{ labels: {_json.dumps(prop_labels)}, datasets: [{{ data: {_json.dumps(prop_values)}, backgroundColor: colors }}] }},
-  options: {{ responsive: true, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+const D = {datos};
+const verde = "#0f6b4f", tinta = "#4f5b55";
+Chart.defaults.font.family = "'IBM Plex Sans', system-ui, sans-serif";
+Chart.defaults.color = tinta;
+const barras = (id, etiquetas, valores, horizontal, colores) => new Chart(document.getElementById(id), {{
+  type: "bar",
+  data: {{ labels: etiquetas, datasets: [{{ data: valores, backgroundColor: colores || verde, borderRadius: 4 }}] }},
+  options: {{ maintainAspectRatio: false, indexAxis: horizontal ? "y" : "x",
+    plugins: {{ legend: {{ display: false }} }},
+    scales: {{ x: {{ grid: {{ color: "#eceee9" }} }}, y: {{ grid: {{ color: "#eceee9" }} }} }} }}
 }});
-new Chart(document.getElementById('regionChart'), {{
-  type: 'bar',
-  data: {{ labels: {_json.dumps(region_labels)}, datasets: [{{ label: 'Usuarios', data: {_json.dumps(region_values)}, backgroundColor: '#0f6b4f' }}] }},
-  options: {{ responsive: true, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }} }}
-}});
-new Chart(document.getElementById('catChart'), {{
-  type: 'bar',
-  data: {{ labels: {_json.dumps(cat_labels)}, datasets: [{{ label: 'Productos', data: {_json.dumps(cat_values)}, backgroundColor: '#2ec4b6' }}] }},
-  options: {{ responsive: true, plugins: {{ legend: {{ display: false }} }} }}
-}});
-new Chart(document.getElementById('estadoChart'), {{
-  type: 'pie',
-  data: {{ labels: {_json.dumps(estado_labels)}, datasets: [{{ data: {_json.dumps(estado_values)}, backgroundColor: colors }}] }},
-  options: {{ responsive: true, plugins: {{ legend: {{ position: 'bottom' }} }} }}
-}});
-new Chart(document.getElementById('topChart'), {{
-  type: 'bar',
-  data: {{ labels: {_json.dumps(top_labels)}, datasets: [{{ label: 'Transacciones', data: {_json.dumps(top_values)}, backgroundColor: '#5bc0be' }}] }},
-  options: {{ responsive: true, indexAxis: 'y', plugins: {{ legend: {{ display: false }} }} }}
-}});
+barras("g-prop", D.prop[0], D.prop[1], false, ["#0f6b4f", "#5aa889", "#c9d9d1"]);
+barras("g-top", D.top[0], D.top[1], true);
+barras("g-reg", D.reg[0], D.reg[1], false);
 </script>
-</div>
 </body></html>"""
